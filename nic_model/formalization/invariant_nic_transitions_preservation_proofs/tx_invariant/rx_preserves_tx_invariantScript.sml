@@ -1,0 +1,111 @@
+open HolKernel Parse boolLib bossLib;
+open helperTactics;
+open rxInvariantTheory;
+open rx_transition_preserves_rx_invariant_well_definedTheory;
+open rxInvariantWellDefinedTheory;
+open txInvariantTheory;
+open txInvariantWellDefinedTheory;
+open tx_invariant_well_defined_lemmasTheory;
+open rx_transition_preserves_other_automataTheory;
+open rx_transition_PRESERVES_BD_QUEUE_NOT_OVERLAPPING_RX_BD_QUEUETheory;
+open it_state_lemmasTheory;
+open txInvariantMemoryReadsPreservedTheory;
+open rx_transition_definitionsTheory;
+open bd_queueTheory;
+open qdInvariantTheory;
+
+val _ = new_theory "rx_preserves_tx_invariant";
+
+val rx_transition_PRESERVES_DEAD_lemma = store_thm (
+  "rx_transition_PRESERVES_DEAD_lemma",
+  ``!nic env nic' mr' WRITABLE.
+    ((nic', mr') = rx_transition env nic) /\
+    RX_STATE_AUTONOMOUS_TRANSITION_ENABLE nic /\
+    RX_INVARIANT_MEMORY nic WRITABLE
+    ==>
+    (nic'.dead = nic.dead)``,
+  REPEAT GEN_TAC THEN
+  REWRITE_TAC [RX_INVARIANT_MEMORY_def] THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_transition_PRESERVES_RX_INVARIANT_WELL_DEFINED_lemma)) THEN
+  RW_ASM_TAC ``RX_INVARIANT_WELL_DEFINED nic`` RX_INVARIANT_WELL_DEFINED_def THEN
+  RW_ASM_TAC ``RX_INVARIANT_WELL_DEFINED nic'`` RX_INVARIANT_WELL_DEFINED_def THEN
+  SPLIT_ASM_TAC THEN
+  RW_ASM_TAC ``RX_INVARIANT_NOT_DEAD nic`` RX_INVARIANT_NOT_DEAD_def THEN
+  RW_ASM_TAC ``RX_INVARIANT_NOT_DEAD nic'`` RX_INVARIANT_NOT_DEAD_def THEN
+  ASM_REWRITE_TAC []);
+
+val TX_INVARIANT_MEMORY_IMP_TX_BD_QUEUE_IN_CPPI_RAM_lemma = store_thm (
+  "TX_INVARIANT_MEMORY_IMP_TX_BD_QUEUE_IN_CPPI_RAM_lemma",
+  ``!nic READABLE.
+    TX_INVARIANT_MEMORY nic READABLE
+    ==>
+    BDs_IN_CPPI_RAM (tx_bd_queue nic)``,
+  REPEAT GEN_TAC THEN
+  REWRITE_TAC [TX_INVARIANT_MEMORY_def] THEN
+  REWRITE_TAC [TX_INVARIANT_WELL_DEFINED_def] THEN
+  DISCH_TAC THEN
+  MATCH_MP_TAC TX_INVARIANT_BD_QUEUE_LOCATION_DEFINED_IMP_BD_QUEUE_IN_CPPI_RAM_lemma THEN
+  ASM_REWRITE_TAC []);
+
+val RX_INVARIANT_MEMORY_IMP_RX_INVARIANT_WELL_DEFINED_lemma = store_thm (
+  "RX_INVARIANT_MEMORY_IMP_RX_INVARIANT_WELL_DEFINED_lemma",
+  ``!nic WRITABLE.
+    RX_INVARIANT_MEMORY nic WRITABLE
+    ==>
+    RX_INVARIANT_WELL_DEFINED nic``,
+  REPEAT GEN_TAC THEN
+  REWRITE_TAC [RX_INVARIANT_MEMORY_def, boolTheory.AND1_THM]);
+
+val rx_transition_PRESERVES_TX_INVARIANT_MEMORY_lemma = store_thm (
+  "rx_transition_PRESERVES_TX_INVARIANT_MEMORY_lemma",
+  ``!nic env nic' mr' READABLE WRITABLE.
+    ((nic', mr') = rx_transition env nic) /\
+    TX_INVARIANT_MEMORY nic READABLE /\
+    RX_STATE_AUTONOMOUS_TRANSITION_ENABLE nic /\
+    RX_INVARIANT_MEMORY nic WRITABLE /\
+    NO_BD_LIST_OVERLAP (tx_bd_queue nic) (rx_bd_queue nic)
+    ==>
+    TX_INVARIANT_MEMORY nic' READABLE``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_transition_PRESERVES_DEAD_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_transition_PRESERVES_OTHER_AUTOMATA_lemma)) THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL TX_INVARIANT_MEMORY_IMP_TX_BD_QUEUE_IN_CPPI_RAM_lemma)) THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL RX_INVARIANT_MEMORY_IMP_RX_INVARIANT_WELL_DEFINED_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPECL [``nic : nic_state``, ``env : environment``, ``nic' : nic_state``, ``mr' : memory_request option``, ``tx_bd_queue nic``] rx_transition_PRESERVES_BD_QUEUE_NOT_OVERLAPPING_RX_BD_QUEUE_lemma)) THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL EQ_INIT_IMP_EQ_INIT_STATE_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_INVARIANT_MEMORY_PRESERVED_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val RX_AUTONOMOUS_TRANSITION_PRESERVES_TX_INVARIANT_lemma = store_thm (
+  "RX_AUTONOMOUS_TRANSITION_PRESERVES_TX_INVARIANT_lemma",
+  ``!nic env nic' mr' READABLE WRITABLE.
+    RX_AUTONOMOUS_TRANSITION nic env nic' mr' /\
+    TX_INVARIANT nic READABLE /\
+    RX_INVARIANT nic WRITABLE /\
+    QD_INVARIANT nic
+    ==>
+    TX_INVARIANT nic' READABLE``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  RW_KEEP_ASM_TAC ``RX_AUTONOMOUS_TRANSITION nic env nic' mr'`` RX_AUTONOMOUS_TRANSITION_def THEN
+  SPLIT_ASM_TAC THEN
+  RW_ASM_TAC ``TX_INVARIANT nic READABLE`` TX_INVARIANT_def THEN
+  RW_ASM_TAC ``QD_INVARIANT nic`` QD_INVARIANT_def THEN
+  REWRITE_TAC [TX_INVARIANT_def] THEN
+  DISCH_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL RX_AUTONOMOUS_TRANSITION_REVERSE_PRESERVES_TX_STATE_AUTONOMOUS_TRANSITION_ENABLE_OR_PROCESS_MEMORY_READ_REPLY_lemma)) THEN
+  REPEAT (PAT_ASSUM ``P ==> Q`` (fn thm => ASSUME_TAC (CONJ_ANT_TO_HYP thm))) THEN
+  RW_ASM_TAC ``RX_INVARIANT nic WRITABLE`` RX_INVARIANT_def THEN
+  PAT_ASSUM ``P ==> Q`` (fn thm => ASSUME_TAC (UNDISCH thm)) THEN
+  RW_ASM_TAC ``BD_QUEUEs_DISJOINT (tx_bd_queue nic) (rx_bd_queue nic)`` BD_QUEUEs_DISJOINT_def THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_transition_PRESERVES_TX_INVARIANT_MEMORY_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val _ = export_theory();
+

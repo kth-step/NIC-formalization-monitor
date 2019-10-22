@@ -1,0 +1,31 @@
+open HolKernel Parse boolLib bossLib;
+
+val _ = new_theory "tx_write_defs";
+
+val NIC_DELTA_CPPI_RAM_WRITE_STEP_BD_PAs_defs = [
+  boolTheory.TRUTH,
+  tx_1fetch_next_bd_lemmasTheory.tx_1fetch_next_bd_cppi_ram_write_step_bd_pas_def,
+  tx_2issue_next_memory_read_request_lemmasTheory.tx_2issue_next_memory_read_request_cppi_ram_write_step_bd_pas_def,
+  tx_3process_memory_read_reply_lemmasTheory.tx_3process_memory_read_reply_cppi_ram_write_step_bd_pas_def,
+  tx_4post_process_lemmasTheory.tx_4post_process_cppi_ram_write_step_bd_pas_def,
+  tx_5clear_owner_and_hdp_lemmasTheory.tx_5clear_owner_and_hdp_cppi_ram_write_step_bd_pas_def,
+  tx_6write_cp_lemmasTheory.tx_6write_cp_cppi_ram_write_step_bd_pas_def];
+
+val NIC_DELTA_CPPI_RAM_WRITE_STEP_BD_PAs_CONJ_defs = save_thm (
+  "NIC_DELTA_CPPI_RAM_WRITE_STEP_BD_PAs_CONJ_defs",
+  LIST_CONJ NIC_DELTA_CPPI_RAM_WRITE_STEP_BD_PAs_defs);
+
+val NIC_DELTA_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemmas = [
+  boolTheory.TRUTH,
+  tx_1fetch_next_bd_lemmasTheory.tx_1fetch_next_bd_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemma,
+  tx_2issue_next_memory_read_request_lemmasTheory.tx_2issue_next_memory_read_request_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemma,
+  tx_3process_memory_read_reply_lemmasTheory.tx_3process_memory_read_reply_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemma,
+  tx_4post_process_lemmasTheory.tx_4post_process_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemma,
+  tx_5clear_owner_and_hdp_lemmasTheory.tx_5clear_owner_and_hdp_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemma,
+  tx_6write_cp_lemmasTheory.tx_6write_cp_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemma];
+
+val NIC_DELTA_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_CONJ_lemmas = save_thm (
+  "NIC_DELTA_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_CONJ_lemmas",
+  LIST_CONJ NIC_DELTA_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_BD_QUEUE_lemmas);
+
+val _ = export_theory();

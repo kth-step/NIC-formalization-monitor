@@ -1,0 +1,38 @@
+/*
+ * The initialization automaton has four states with the following meaning:
+ * *after_power_on: This state represents the state of the physical NIC
+ *  immediately after power on. When the CPU model sets the
+ *  CPDMA_SOFT_RESET register to 1, the initialization automaton transitions to
+ *  the state reset.
+ * *reset: This state represents the state of the physical NIC when the physical
+ *  NIC is resetting itself. When the scheduler decides that the initialization
+ *  automaton has completed the reset operation, the initialization automaton
+ *  transitions to the state initialize_hdp_cp.
+ * *initialize_hdp_cp: This state represents the state of the physical NIC when
+ *  the physical NIC waits for the CPU to initialize TX0_HDP, RX0_HDP, TX0_CP
+ *  and RX0_CP to zero. When the CPU has initialized these four registers, the
+ *  initialization automaton enters the state initialized.
+ * *initialized: This state represents a state of the physical NIC where the
+ *  physical NIC has been initialized and initialization is not in progress.
+ */
+
+-------------------------------------------------------------------------------
+/*
+ *	init describes the hardware reset operation, which is the first part of the
+ *	initialization operation. The second part is the initialization of the HDP
+ *	and CP registers, which is done by writing these NIC registers immediately
+ *	after the reset operation is finished.
+ *
+ *	Since the NIC specification does not say what the reset operation does,
+ *	except from clearing the least significant bit of the CPDMA_SOFT_RESET
+ *	register when it is done, no hardware work other than that is done.
+ *	init_step is also set to two to set the initialization automaton in a state
+ *	that indicates that the HDP and CP registers should now be initialized by
+ *	setting them to zero. When they are initialized, init_step is set to zero,
+ *	and init_complete to true.
+ */
+(nic_state, mem_req) it_1reset(nic_state nic) ≝
+	nic.regs.CPDMA_SOFT_RESET := 0
+	nic.it.it_state := it_initialize_hdp_cp
+	return (nic, ⊥)
+-------------------------------------------------------------------------------

@@ -1,0 +1,188 @@
+open HolKernel Parse boolLib bossLib;
+open helperTactics;
+open rx_18clear_sop_owner_and_hdp_lemmasTheory;
+open rxInvariantWellDefinedTheory;
+open rx_state_lemmasTheory;
+open rx_bd_queueTheory;
+open rxInvariantWellDefinedRX_INVARIANT_BD_QUEUE_WELL_DEFINED_lemmasTheory;
+
+val _ = new_theory "rx_18clear_sop_owner_and_hdp_preserves_well_defined";
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_NOT_DEAD_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_NOT_DEAD_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_INVARIANT_NOT_DEAD nic
+    ==>
+    RX_INVARIANT_NOT_DEAD nic'``,
+  REPEAT GEN_TAC THEN
+  REWRITE_TAC [RX_INVARIANT_NOT_DEAD_def] THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_NOT_MODIFIED_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_FINITE_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_FINITE_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_STATE_CLEAR_SOP_OWNER_AND_HDP nic /\
+    RX_INVARIANT_BD_QUEUE_FINITE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT nic /\
+    RX_INVARIANT_BD_QUEUE_NO_OVERLAP (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (rx_bd_queue nic)
+    ==>
+    RX_INVARIANT_BD_QUEUE_FINITE nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL RX_STATE_CLEAR_SOP_OWNER_AND_HDP_IMP_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_SUBINVARIANT_IMP_BD_QUEUE_FINITE_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_STRUCTURE_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_STRUCTURE_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_STATE_CLEAR_SOP_OWNER_AND_HDP nic /\
+    RX_INVARIANT_BD_QUEUE_FINITE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT nic /\
+    RX_INVARIANT_BD_QUEUE_NO_OVERLAP (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (rx_bd_queue nic)
+    ==>
+    RX_INVARIANT_BD_QUEUE_STRUCTURE nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL RX_STATE_CLEAR_SOP_OWNER_AND_HDP_IMP_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_SUBINVARIANT_IMP_BD_QUEUE_FINITE_lemma)) THEN
+  REWRITE_TAC [RX_INVARIANT_BD_QUEUE_STRUCTURE_def] THEN
+  EXISTS_TAC ``[] : bd_pa_type list`` THEN
+  REWRITE_TAC [listTheory.APPEND] THEN
+  MATCH_MP_TAC (GSYM RX_write_cp_IMP_unseen_bd_queue_EQ_bd_queue_lemma) THEN
+  ASM_REWRITE_TAC [rx_18clear_sop_owner_and_hdp_NEXT_STATE_RX_STATE_WRITE_CP_lemma]);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_STRUCTURE_SUPPORT_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_STRUCTURE_SUPPORT_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_STATE_CLEAR_SOP_OWNER_AND_HDP nic /\
+    RX_INVARIANT_BD_QUEUE_FINITE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT nic /\
+    RX_INVARIANT_BD_QUEUE_NO_OVERLAP (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_WELL_DEFINED (rx_unseen_bd_queue nic) nic.regs.CPPI_RAM /\
+    RX_INVARIANT_RX_BUFFER_OFFSET_ZERO nic
+    ==>
+    RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_SUBINVARIANT_IMP_BD_QUEUE_STRUCTURE_SUPPORT1_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_SUBINVARIANT_IMP_BD_QUEUE_STRUCTURE_SUPPORT2_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_SUBINVARIANT_IMP_BD_QUEUE_STRUCTURE_SUPPORT3_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_SUBINVARIANT_IMP_BD_QUEUE_STRUCTURE_SUPPORT4_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_SUBINVARIANT_IMP_BD_QUEUE_STRUCTURE_SUPPORT5_lemma)) THEN
+  ASM_REWRITE_TAC [RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT_def]);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_NO_OVERLAP_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_NO_OVERLAP_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_STATE_CLEAR_SOP_OWNER_AND_HDP nic /\
+    RX_INVARIANT_BD_QUEUE_FINITE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT nic /\
+    RX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_NO_OVERLAP (rx_bd_queue nic)
+    ==>
+    RX_INVARIANT_BD_QUEUE_NO_OVERLAP (rx_bd_queue nic')``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL RX_STATE_CLEAR_SOP_OWNER_AND_HDP_IMP_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_SUBINVARIANT_IMP_BD_QUEUE_NO_OVERLAP_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_LOCATION_DEFINED_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_LOCATION_DEFINED_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_STATE_CLEAR_SOP_OWNER_AND_HDP nic /\
+    RX_INVARIANT_BD_QUEUE_FINITE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT nic /\
+    RX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_NO_OVERLAP (rx_bd_queue nic)
+    ==>
+    RX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (rx_bd_queue nic')``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL RX_STATE_CLEAR_SOP_OWNER_AND_HDP_IMP_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_RX_STATE_ISSUE_NEXT_MEMORY_WRITE_REQUEST_OR_WRITE_CPPI_RAM_SUBINVARIANT_IMP_BD_QUEUE_LOCATION_DEFINED_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_WELL_DEFINED_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_WELL_DEFINED_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_STATE_CLEAR_SOP_OWNER_AND_HDP nic /\
+    RX_INVARIANT_BD_QUEUE_FINITE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE nic /\
+    RX_INVARIANT_BD_QUEUE_STRUCTURE_SUPPORT nic /\
+    RX_INVARIANT_BD_QUEUE_NO_OVERLAP (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (rx_bd_queue nic) /\
+    RX_INVARIANT_BD_QUEUE_WELL_DEFINED (rx_unseen_bd_queue nic) nic.regs.CPPI_RAM
+    ==>
+    RX_INVARIANT_BD_QUEUE_WELL_DEFINED (rx_unseen_bd_queue nic') nic'.regs.CPPI_RAM``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASM_REWRITE_TAC [] THEN
+  MATCH_MP_TAC NIC_DELTA_WRITES_RX_SEEN_BDs_PRESERVES_WELL_DEFINED_RX_UNSEEN_BD_QUEUE_lemma THEN
+  EXISTS_TAC ``rx_18clear_sop_owner_and_hdp_cppi_ram_write_step_bd_pas nic`` THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL RX_STATE_CLEAR_SOP_OWNER_AND_HDP_SUBINVARIANT_IMP_WRITES_FIELDs_NOT_NDP_OF_BDs_IN_RX_SEEN_BD_QUEUE_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL RX_STATE_CLEAR_SOP_OWNER_AND_HDP_SUBINVARIANT_IMP_RX_UNSEEN_BD_QUEUE_PRESERVED_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_RX_BUFFER_OFFSET_ZERO_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_RX_BUFFER_OFFSET_ZERO_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_INVARIANT_RX_BUFFER_OFFSET_ZERO nic
+    ==>
+    RX_INVARIANT_RX_BUFFER_OFFSET_ZERO nic'``,
+  REPEAT GEN_TAC THEN
+  REWRITE_TAC [RX_INVARIANT_RX_BUFFER_OFFSET_ZERO_def] THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (UNDISCH (SPEC_ALL rx_18clear_sop_owner_and_hdp_NOT_MODIFIED_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val rx_18clear_sop_owner_and_hdp_PRESERVES_RX_INVARIANT_WELL_DEFINED_lemma = store_thm (
+  "rx_18clear_sop_owner_and_hdp_PRESERVES_RX_INVARIANT_WELL_DEFINED_lemma",
+  ``!nic nic'.
+    (nic' = rx_18clear_sop_owner_and_hdp nic) /\
+    RX_STATE_CLEAR_SOP_OWNER_AND_HDP nic /\
+    RX_INVARIANT_WELL_DEFINED nic
+    ==>
+    RX_INVARIANT_WELL_DEFINED nic'``,
+  REPEAT GEN_TAC THEN
+  REWRITE_TAC [RX_INVARIANT_WELL_DEFINED_def] THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_NOT_DEAD_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_FINITE_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_STRUCTURE_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_STRUCTURE_SUPPORT_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_NO_OVERLAP_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_LOCATION_DEFINED_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_BD_QUEUE_WELL_DEFINED_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL rx_18clear_sop_owner_and_hdp_PRESERVES_RX_BUFFER_OFFSET_ZERO_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val _ = export_theory();

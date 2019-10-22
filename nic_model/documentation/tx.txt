@@ -1,0 +1,474 @@
+/*
+ * Documentation of the transmission automaton of the NIC model in text and
+ * pseudo code.
+ *
+ * The states of the transmission automaton are:
+ * -idle: The transmission automaton is idle meaning no transmission is in
+ *  progress (the transmission automaton cannot perform any anutonomous
+ *  transitions).
+ * -fetch_next_bd: The transmission automaton is about to fetch the next buffer
+ *  descriptor.
+ * -issue_next_memory_read_request: The transmission automaton is about to
+ *  issue the next memory read request for the next byte to read.
+ * -process_memory_read_reply: The transmission automaton is waiting for the
+ *  reply to the recently issued memory read request.
+ * -post_process: The transmission automaton has read all bytes of the frame
+ *  to transmit, therefore finalized the transmission of the currently
+ *  processed frame. The transmission automaton is about to post process the
+ *  SOP and EOP buffer descriptors of the transmitted frame.
+ * -clear_owner_and_hdp: The transmission automaton has set the EOQ bit of the
+ *  currently processed buffer descriptor. This state is only entered if the
+ *  currently processed buffer descriptor is last in the transmission queue.
+ *  The transmission automaton is therefore about to clear the ownership bit of
+ *  the SOP buffer descriptor of the current frame and the TX0_HDP register.
+ * -write_cp: The transmission automaton has completed the transmission of a
+ *  frame and will therefore write TX0_CP with the physical address of the EOP
+ *  buffer descriptor, and non-deterministically assert a transmission completion
+ *  interrupt.
+ *
+ * In more detail, the transmission automaton operates as follows with respect
+ * to the current state:
+ * -idle: The CPU writes TX0_HDP with the physical address of the first buffer
+ *  descriptor in a queue whose buffers are to be transmitted. If TX0_HDP is
+ *  distinct from zero, the NIC model enters a dead state. Otherwise, the
+ *  transmission automaton transitions to the state fetch_next_bd.
+ *
+ * -fetch_next_bd: If the current/first buffer descriptor in the queue is
+ *  32-bit aligned and it is completely located in CPPI_RAM, then the current
+ *  buffer descriptor is read from CPPI_RAM. Otherwise the NIC model enters a
+ *  dead state. The transmission automaton then checks whether the read buffer
+ *  descriptor is incorrectly initialized. If not, the NIC model enters a dead
+ *  state. Only from this state can the NIC model enters a dead state when it
+ *  shall perform an autonomous transition of the transmission automaton.
+ *  Otherwise the transmission automaton transitions to the state
+ *  issue_next_memory_read_request.
+ *
+ * -issue_next_memory_read_request: The transmission automaton issues a memory
+ *  read request for the next byte of the buffer of the current buffer
+ *  descriptor, and transitions to process_memory_read_reply.
+ *
+ * -process_memory_read_reply: The transmission automaton receives a reply to
+ *  the most recently issued memory read request. If there are more bytes to
+ *  read of the buffer of the current buffer descriptor, then the transmission
+ *  automaton transitions to issue_next_memory_read_request. Otherwise the
+ *  transmission automaton transitions to post_process.
+ *
+ * -post_process: The transmission automaton has completed the transmission of
+ *  a frame and shall therefore start post processing. The exact operations
+ *  depend on whether the current EOP buffer descriptor is last in the queue or
+ *  not. If it last in the queue then the EOQ bit is set and the transmission
+ *  automaton transitions to clear_owner_and_hdp. Otherwise only the ownership
+ *  bit is cleared of the SOP buffer descriptor and the NIC transitions to
+ *  write_cp.
+ *
+ * -clear_owner_and_hdp: This state is entered only if the processing of the
+ *  transmission queue has finished. The transmission automaton clears the
+ *  ownership bit of the SOP buffer descriptor and the TX0_HDP register, and
+ *  transitions to write_cp.
+ *
+ * -write_cp: TX0_CP is set to the physical address of the EOP buffer
+ *  descriptor of the transmitted frame. In addition, a frame transmission
+ *  completion interrupt is asserted non-deterministically since the interrupt
+ *  related registers are not included in the NIC model. If the transmission
+ *  queue has been processed, or the initialization or transmission teardown
+ *  automata are pending, then the transmission automaton transitions to idle.
+ *  Otherwise the transmission automaton must process additional buffer
+ *  descriptors and therefore transitions to fetch_next_bd.
+ *
+ * The state components of the transmission automaton are:
+ * -nic.tx.state : tx_state: Current state of the transmission automaton.
+ *  Initialized to idle.
+ * -nic.tx.current_bd_pa : word32: Physical address of the buffer descriptor
+ *  currently being processed. Initialization irrelevant.
+ * -nic.tx.current_bd_word0 : word32: First four bytes of the buffer descriptor
+ *  currently being processed. This is the next descriptor pointer field.
+ *  Initialization irrelevant.
+ * -nic.tx.current_bd_word1 : word32: Second four bytes of the buffer
+ *  descriptor currently being processed. This is the buffer pointer field.
+ *  Initialization irrelevant.
+ * -nic.tx.current_bd_word2 : word32: Third four bytes of the buffer descriptor
+ *  currently being processed. This is the buffer length and buffer offset
+ *  fields. Initialization irrelevant.
+ * -nic.tx.current_bd_word3 : word32: Fourth four bytes of the buffer
+ *  descriptor currently being processed. This is the flags fields.
+ *  Initialization irrelevant.
+ * -nic.tx.expects_sop : bool: True if and only if the next buffer descriptor
+ *  to process (after the current one if any) shall be a SOP. Initialization
+ *  irrelevant.
+ * -nic.tx.sum_buffer_length : word32: Sum of all buffer length fields of all
+ *  buffer descriptors fetched from memory of the current frame under
+ *  transmission. Initialization irrelevant.
+ * -nic.tx.packet_length : word32: Packet length field of the SOP buffer
+ *  descriptor of the frame currently being transmitted. Initialization
+ *  irrelevant.
+ * -nic.tx.sop_bd_pa : word32: Physical address of the SOP buffer descriptor of
+ *  the frame currently being transmitted. Initialization irrelevant.
+ * -nic.tx.pa_of_next_memory_buffer_byte : word32: Physical address of the next
+ *  byte to fetch from memory. Initialization irrelevant.
+ * -nic.tx.eop_bd_pa : word32: Physical address of the EOP buffer descriptor of
+ *  the frame currently being transmitted. Initialization irrelevant.
+ * -nic.tx.number_of_buffer_bytes_left_to_request : word32: Number of memory
+ *  read requests that remains to issue of the frame currently being
+ *  transmitted. Initialization irrelevant.
+ * -nic.tx.interrupt : bool: True if and only if a transmission completion
+ *  interrupt is currently being asserted. Initialized to false (the NIC in a
+ *  powered on state does not assert a transmission completion interrupt).
+ */
+
+/*
+ * Constants and auxiliary functions.
+ */
+//True if and only if pa is 32-bit word aligned.
+WORD32_ALIGNED(pa : word32) ≝ pa[1:0] = 0b00
+
+//Physical start address of CPPI_RAM on BeagleBone Black.
+CPPI_RAM_START ≝ 0x4A10_2000 : word32
+//Physical exclusive end address of CPPI_RAM on BeagleBone Black.
+CPPI_RAM_END ≝ 0x4A10_4000 : word32
+
+//True if and only if all bytes of a buffer descriptor starting at physical address bd_pa are located inside CPPI_RAM.
+BD_IN_CPPI_RAM(bd_pa : word32) ≝ bd_pa ≥ CPPI_RAM_START ∧ CPPI_RAM_END - 0xF ≤ bd_pa
+
+//True if and only if bd_pa is a well-defined physical buffer descriptor address.
+BD_LOCATION_SECURE(bd_pa : word32) ≝ WORD32_ALIGNED(bd_pa) ∧ BD_IN_CPPI_RAM(bd_pa)
+
+//Reads a 32-bit word in CPPI_RAM with offset word_index with respect to the physical address bd_pa.
+read_bd_word(CPPI_RAM : word13 → word8, bd_pa : word32, word_index : word32) ≝
+	CPPI_RAM(bd_pa - CPPI_RAM_START + 4*word_index + 3) ::
+	CPPI_RAM(bd_pa - CPPI_RAM_START + 4*word_index + 2) ::
+	CPPI_RAM(bd_pa - CPPI_RAM_START + 4*word_index + 1) ::
+	CPPI_RAM(bd_pa - CPPI_RAM_START + 4*word_index + 0)
+
+//The value of the SOP bit in the fourth word of a buffer descriptor.
+SOP(bd_word3 : word32) ≝ bd_word3[31] = 0b1
+//The value of the EOP bit in the fourth word of a buffer descriptor.
+EOP(bd_word3 : word32) ≝ bd_word3[30] = 0b1
+//The value of the ownership bit in the fourth word of a buffer descriptor.
+OWN(bd_word3 : word32) ≝ bd_word3[29] = 0b1
+//The value of the EOQ bit in the fourth word of a buffer descriptor.
+EOQ(bd_word3 : word32) ≝ bd_word3[28] = 0b1
+
+//The buffer offset field of the third word of a transmission buffer descriptor.
+tx_buffer_offset(bd_word2 : word32) ≝ 0x0000::bd_word2[31:16] : word32
+//The buffer length field of the third word of a transmission buffer descriptor.
+tx_buffer_length(bd_word2 : word32) ≝ 0x0000::bd_word2[15:0] : word32
+//The packet length field of the fourth word of a transmission buffer descriptor.
+packet_length(bd_word3 : word32) ≝ 0x00000::bd_word3[10:0] : word32
+
+//Physical start address of RAM on BeagleBone Black.
+RAM_INCLUSIVE_START ≝ 0x8000_0000 : word32
+//Physical (exclusive) end address of RAM on BeagleBone Black.
+RAM_EXCLUSIVE_END ≝ 0xA000_0000 : word32
+//True if and only if a buffer is completely located in RAM (if no overflow occurs when adding bl).
+BUFFER_START_END_IN_RAM(bp : word32, bo : word32, bl : word32) ≝ bp + bo ≥ RAM_INCLUSIVE_START ∧ bp + bo + bl - 1 < RAM_EXCLUSIVE_END
+
+//True if and only if the buffer offset value is greater than or equal to the buffer length value.
+TX_BO_TOO_LARGE(bo : word32, bl : word32) ≝ bo ≥ bl
+
+//True if and only if addition of the buffer length field causes an overflow.
+BUFFER_WRAP_OVERFLOW(bp : word32, bo : word32, bl : word32) ≝ bp + bo + bl < bp + bo
+
+//True if and only if sum + bl exceeds the maximum value that can be stored in the packet length field.
+BUFFER_LENGTH_OVERFLOW(sum : word32, bl : word32) ≝ sum + bl ≥ 2¹¹
+
+//True if and only if the buffer descriptor with word 0 being bd_word0 is the last buffer descriptor in the queue.
+LAST_BD(bd_word0 : word32) ≝ bd_word0 = 0
+
+//True if and only if there are no bytes left to request.
+ALL_BYTES_REQUESTED(number_of_requested_bytes : word32) ≝ number_of_requested_bytes = 0
+
+//True if and only if the sum of all buffer length fields is equal to the packet length field of the SOP.
+CONSISTENT_SUM_BUFFER_LENGTH(computed_sum : word32, specified_sum : word32) ≝ computed_sum = specified_sum
+
+//Sets EOQ bit in buffer descriptor at physical address bd_pa.
+set_eoq(CPPI_RAM : word13 → word8, bd_pa : word32) ≝
+	CPPI_RAM(bd_pa - CPPI_RAM_START + 15)[4] ≔ 1
+	return CPPI_RAM
+
+//Clears the ownership bit in the buffer descriptor at physical address bd_pa.
+clear_own(CPPI_RAM : word13 → word8, bd_pa : word32) ≝
+	CPPI_RAM(bd_pa - CPPI_RAM_START + 15)[5] ≔ 0
+	return CPPI_RAM
+
+
+/*
+ * The transition function of the NIC model that describes autonomous
+ * transitions of the transmission part of the physical NIC.
+ */
+nic_state ⨯ mem_req : tx_transition(nic : nic_state, assert_interrupt : bool) ≝
+	memory_request ≔ ⊥
+	if nic.tx.state = idle then
+		nic.dead ≔ true
+	else if nic.tx.state = fetch_next_bd then
+		nic ≔ fetch_next_bd(nic)
+	else if nic.tx.state = issue_next_memory_read_request then
+		(nic, memory_request) ≔ issue_next_memory_read_request(nic)
+	//tx_transition should not be applied when the transmission automaton is
+	//waiting for memory read request replies.
+	else if nic.tx.state = process_memory_read_reply then
+		nic.dead ≔ true
+	else if nic.tx.state = post_process then
+		nic ≔ post_process(nic)
+	else if nic.tx.state = clear_owner_and_hdp then
+		nic ≔ clear_owner_and_hdp(nic)
+	else (* transmission automaton is in the state write_cp. *)
+		nic ≔ write_cp(nic, assert_interrupt)
+
+	return (nic, memory_request)
+
+/*
+ * The transmission automaton is about to fetch the next buffer descriptor.
+ *
+ * If all bytes of the current buffer descriptor are located in CPPI_RAM and
+ * the buffer descriptor is 32-bit word aligned, then the current buffer
+ * descriptor is read from CPPI_RAM. Otherwise the NIC model enters a dead
+ * state.
+ *
+ * The transmission automaton then checks whether the read buffer descriptor is
+ * incorrectly initialized. If not, the NIC model enters a dead state.
+ * Otherwise bookkeeping i stored into the state enabling the transmission
+ * automaton to describe memory reads and post processing.
+ */
+nic_state : fetch_next_bd(nic : nic_state) ≝
+	//Checks that the buffer descriptor is completely located in CPPI_RAM.
+	if ¬BD_LOCATION_SECURE(nic.tx.current_bd_pa) then
+		nic.dead ≔ true
+	else
+		//Reads the buffer descriptor.
+		nic.tx.current_bd_word0 = read_bd_word(nic.regs.CPPI_RAM, nic.tx.current_bd_pa, 0)
+		nic.tx.current_bd_word1 = read_bd_word(nic.regs.CPPI_RAM, nic.tx.current_bd_pa, 1)
+		nic.tx.current_bd_word2 = read_bd_word(nic.regs.CPPI_RAM, nic.tx.current_bd_pa, 2)
+		nic.tx.current_bd_word3 = read_bd_word(nic.regs.CPPI_RAM, nic.tx.current_bd_pa, 3)
+
+		//Initializes local variables used only in this function.
+		word32 bp ≔ nic.tx.current_bd_word1
+		word32 bo ≔ tx_buffer_offset(nic.tx.current_bd_word2)
+		word32 bl ≔ tx_buffer_length(nic.tx.current_bd_word2)
+		word32 pl ≔ packet_length(nic.tx.current_bd_word3)
+		bool sop ≔ SOP(nic.tx.current_bd_word3)
+		bool eop ≔ EOP(nic.tx.current_bd_word3)
+		bool own ≔ OWN(nic.tx.current_bd_word3)
+		bool eoq ≔ EOQ(nic.tx.current_bd_word3)
+
+		//Checks whether the buffer descriptor is incorrectly initialized.
+		//A SOP buffer descriptor is expected but the buffer descriptor is not
+		//a SOP.
+		if nic.tx.expects_sop ∧ ¬sop then
+			nic.dead ≔ true
+		//A SOP buffer descriptor is expected and the buffer descriptor is a
+		//SOP, and either the ownership bit is cleared or the buffer offset
+		//field is greater than or equal to the buffer length field.
+		else if nic.tx.expects_sop ∧ sop ∧ (¬own ∨ TX_BO_TOO_LARGE(bo, bl)) then
+			nic.dead ≔ true
+		//A non-SOP buffer descriptor is expected but the buffer descriptor is
+		//a SOP.
+		else if ¬nic.tx.expects_sop ∧ sop then
+			nic.dead ≔ true
+		//The buffer length field must be greater than zero.
+		else if bl = 0 then
+			nic.dead ≔ true
+		//The EOQ bit must be cleared in EOP buffer descriptors.
+		else if eop ∧ eoq then
+			nic.dead ≔ true
+		//The buffer descriptor is a SOP but the addressed buffer (taking into
+		//consideration the buffer offset field) is not completely located in
+		//RAM or wraps around 2³² (overflows).
+		else if sop ∧ (¬BUFFER_START_END_IN_RAM(bp, bo, bl) ∨ BUFFER_WRAP_OVERFLOW(bp, bo, bl)) then
+			nic.dead ≔ true
+		//The buffer descriptor is not a SOP but the addressed buffer (not
+		//taking into consideration the buffer offset field) is not completely
+		//located in RAM or wraps around 2³² (overflows).
+		else if ¬sop ∧ (¬BUFFER_START_END_IN_RAM(bp, 0, bl) ∨ BUFFER_WRAP_OVERFLOW(bp, 0, bl)) then
+			nic.dead ≔ true
+		//The buffer descriptor is not an EOP but is last in the queue.
+		else if ¬eop ∧ LAST_BD(nic.tx.current_bd_word0) then
+			nic.dead ≔ true
+		//The sum of the buffer length fields, of all buffer descriptors
+		//including the current buffer descriptor of the frame currently being
+		//transmitted, exceeds the maximum value of the packet length field.
+		else if ¬sop ∧ BUFFER_LENGTH_OVERFLOW(nic.tx.sum_buffer_length, bl) then
+			nic.dead ≔ true
+		//The current buffer descriptor is an EOP and a SOP. The consistency of
+		//the buffer length and the packet length fields is checked.
+		else if eop ∧ sop ∧ ¬CONSISTENT_SUM_BUFFER_LENGTH(bl, pl) then
+			nic.dead ≔ true
+		//The current buffer descriptor is an EOP and not a SOP. The
+		//consistency of the buffer length and the packet length fields is
+		//checked.
+		else if eop ∧ ¬sop ∧ ¬CONSISTENT_SUM_BUFFER_LENGTH(nic.tx.sum_buffer_length + bl, nic.tx.packet_length) then
+			nic.dead ≔ true
+		//The buffer descriptor is correctly initialized.
+		else
+			//The current buffer descriptor is a SOP.
+			if sop then
+				//Reads the packet length field which is used later to check
+				//that the packet length field of the SOP buffer descriptor is
+				//equal to the sum of the buffer length fields of all buffer
+				//descriptors of the frame being transmitted, excluding buffer
+				//offset bytes.
+				nic.tx.packet_length ≔ pl
+
+				//sum_buffer_length is set to the value of the buffer length
+				//field of this first buffer descriptor of the frame to
+				//transmit.
+				nic.tx.sum_buffer_length ≔ bl
+
+				//Physical address of the next memory byte to fetch. For SOP
+				//buffer descriptors the buffer offset bytes must be skipped.
+				nic.tx.pa_of_next_memory_buffer_byte ≔ bp + bo
+
+			//The current buffer descriptor is not a SOP.
+			else
+				//If the current buffer descriptor is not a SOP, then
+				//sum_buffer_length is incremented with the buffer length of
+				//the current buffer descriptor.
+				nic.tx.sum_buffer_length ≔+ bl
+
+				//Sets the address of the next byte to fetch from memory.
+				nic.tx.pa_of_next_memory_buffer_byte ≔ bp
+
+			//Sets number_of_buffer_bytes_left_to_request to the number of bytes
+			//to request.
+			nic.tx.number_of_buffer_bytes_left_to_request ≔ bl
+
+			//Sets the transmission automaton in the state where it is waiting
+			//to issue the next memory read request.
+			nic.tx.state ≔ issue_next_memory_read_request
+
+	//Returns the resulting NIC state.
+	return nic
+
+/*
+ * Issues one memory read request for the next byte of the buffer of the
+ * current buffer descriptor, and transitions to process_memory_read_reply.
+ */
+nic_state ⨯ mem_req : issue_next_memory_read_request(nic : nic_state) ≝
+	//Sets the memory request.
+	memory_request ≔ (nic.tx.pa_of_next_memory_buffer_byte, ⊥)
+	//Increments the address for the memory read request following the one
+	//issued by this transition.
+	nic.tx.pa_of_next_memory_buffer_byte ≔+ 1
+	//One memory read request less to make.
+	nic.tx.number_of_buffer_bytes_left_to_request ≔- 1
+	//A memory read request is now pending.
+	nic.tx.state ≔ process_memory_read_reply
+
+    return (nic, memory_request)
+
+/*
+ * Receives the byte at the requested memory address. It is assumed that the
+ * device model framework delivers correct replies.
+ */
+nic_state : process_memory_read_reply(nic : nic_state, memory_request : mem_req) ≝
+	//This is the reply to the last requested byte.
+	if ALL_BYTES_REQUESTED(nic.tx.number_of_buffer_bytes_left_to_request) then
+
+		//If the current buffer descriptor is not an EOP, then the next buffer
+		//descriptor in the queue addresses the next part of the frame being
+		//transmitted, which is not a SOP. Therefore current_bd_pa is updated
+		//to the physical address of the next buffer descriptor in the queue,
+		//expects_sop is set to false, and the state is set to fetch_next_bd.
+		if ¬EOP(nic.tx.current_bd_word3) then
+			nic.tx.current_bd_pa ≔ nic.tx.current_bd_word0
+			nic.tx.expects_sop ≔ false
+			nic.tx.state ≔ fetch_next_bd
+		//Otherwise, the current buffer descriptor is an EOP and all bytes of
+		//the current frame have been transmitted. The NIC model therefore
+		//transitions to the state post_process.
+		else
+			//If the current buffer descriptor is an EOP, then its physical
+			//address is stored in order to enable TX0_CP to be written to this
+			//physical address later.
+			nic.tx.eop_bd_pa = nic.tx.current_bd_pa
+			nic.tx.state ≔ post_process
+	//There are further bytes to fetch from memory.
+	else
+		nic.tx.state ≔ issue_next_memory_read_request
+
+	return nic
+
+/*
+ * The transmission automaton has read all bytes in the buffer addressed by the
+ * currently processed buffer descriptor. This function describes the initial
+ * post processing operations performed by the NIC when a frame has been
+ * transmitted.
+ *
+ * This function is only applied when the NIC model is in the state
+ * post_processed, which can only be reached when the current buffer descriptor
+ * is an EOP.
+ */
+nic_state : post_process(nic : nic_state) ≝
+	//If the current buffer descriptor is last, then the its EOQ bit is set and
+	//the transmission automaton transitions to the state clear_owner_and_hdp.
+	if LAST_BD(nic.tx.current_bd_word0) then
+		nic.regs.CPPI_RAM ≔ set_eoq(nic.regs.CPPI_RAM, nic.tx.current_bd_pa)
+		nic.tx.state ≔ clear_owner_and_hdp
+	//If the current buffer descriptor is not last, then the ownership bit is
+	//cleared of the corresponding SOP buffer descriptor, current_bd_pa is
+	//advanced to the next buffer descriptor in the queue, and the transmission
+	//automaton enters the state write_cp.
+	else
+		nic.regs.CPPI_RAM ≔ clear_own(nic.regs.CPPI_RAM, nic.tx.sop_bd_pa)
+		nic.tx.current_bd_pa ≔ nic.tx.current_bd_word0
+		//Advances sop_bd_pa to the next buffer descriptor which should be SOP.
+		nic.tx.sop_bd_pa ≔ nic.tx.current_bd_word0
+		//Sets the expects_sop flag.
+		nic.tx.expects_sop ≔ true
+		nic.tx.state ≔ write_cp
+
+	return nic
+
+/*
+ * The transmission automaton has set the EOQ bit of the currently processed
+ * buffer descriptor, being last in the transmission queue. The ownership bit
+ * of the SOP buffer descriptor and the TX0_HDP register are cleared. The
+ * transmission automaton transitions to the state write_cp.
+ */
+nic_state : clear_owner_and_hdp(nic : nic_state) ≝
+	//Clears ownership bit.
+	nic.regs.CPPI_RAM ≔ clear_own(nic.regs.CPPI_RAM, nic.tx.sop_bd_pa)
+
+	//Clears TX0_HDP.
+	nic.regs.TX0_HDP ≔ 0
+
+	//Clears current_bd_pa to keep this variable synchronized with TX0_HDP.
+	nic.tx.current_bd_pa ≔ 0
+
+	//Clears sop_bd_pa to keep this variable synchronized with current_bd_pa.
+	nic.tx.sop_bd_pa ≔ 0
+
+	//Clears the expects_sop flag.
+	nic.tx.expects_sop ≔ false
+
+	//Updates the state of the transmission automaton.
+	nic.tx.state ≔ write_cp
+
+	return nic
+
+/*
+ * TX0_CP is set to the physical address of the EOP buffer descriptor of the
+ * transmitted frame. In addition, a frame transmission completion interrupt is
+ * asserted non-deterministically since the interrupt related registers are not
+ * included in the NIC model. If the transmission queue is finished or any of
+ * the initialization and transmission teardown automata are waiting to perform
+ * their operations, then the transmission automaton transitions to idle.
+ * Otherwise the transmission automaton transitions to fetch_next_bd.
+ */
+nic_state : write_cp(nic : nic_state, assert_interrupt : bool) ≝
+	nic.regs.TX0_CP ≔ nic.tx.eop_bd_pa
+
+	//Transmission completion interrupts are asserted non-deterministically
+	//since interrupt related NIC registers are not modeled.
+	if assert_interrupt then
+		nic.tx.interrupt ≔ true
+		nic.interrupt ≔ true
+
+	//If there are no more buffer descriptors in the transmission queue or the
+	//initialization or the transmission teardown automaton is pending, then
+	//the transmission automaton enters the state idle.
+	if nic.tx.current_bd_pa = 0 ∨ nic.init.state = waiting ∨ nic.tx_td.state = waiting then
+		nic.tx.state ≔ idle
+	else
+		nic.tx.state ≔ fetch_next_bd
+
+	return nic

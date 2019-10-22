@@ -1,0 +1,54 @@
+/*
+ * scheduler "non-deterministically" selects the NIC automaton that shall
+ * perform the next autonomous NIC transition (identified by a given argument).
+ * scheduler returns the given NIC state if the NIC model is in a dead state or
+ * no automaton is in a state from which it can perform a transition, then the
+ * given NIC state argument is returned with no memory request.
+ *
+ * Each NIC automaton can perform an autonomous transition if the NIC is in a
+ * state satisfying the following properties:
+ * *Initialization automaton: The initialization automaton is in the reset state
+ *  and the transmission and reception automata are idle (reset operations can
+ *  only occur after frames have been transmitted and received). Formally:
+ *  nic.it.state = it_reset /\ nic.tx.state = tx_idle /\ nic.rx.state = rx_idle.
+ *
+ * *Transmission automaton: The transmission automaton is not in an idle state
+ *  and is not waiting for a memory read request reply. Formally:
+ *  nic.tx.state <> tx_idle /\ nic.tx.state <> tx_process_memory_read_reply.
+ *
+ * *Reception automaton: There are two different states from which the reception
+ *  automaton can perform an autonomous transition:
+ *  -The reception automaton is idle, the reception buffer descriptor queue is
+ *   not empty, the NIC model is not tearing down reception, and the NIC model
+ *   has been initialized and is not currently being initialized. Formally:
+ *   nic.rx.state = rx_idle /\ nic.rx.sop_bd_pa <> 0w /\
+ *   nic.rd.state = rd_idle /\ nic.it.state = it_initialized.
+ *  -The reception automaton is currently processing a received frame. Formally:
+ *   nic.rx.state <> rx_idle.
+ *
+ * *Transmission teardown automaton: The NIC model has been instructed to
+ *  teardown transmission and no transmission is in progress. Formally:
+ *  nic.td.state <> td_idle /\ nic.tx.state = tx_idle.
+ *
+ * *Reception teardown automaton: The NIC model has been instructed to
+ *  teardown reception and no reception is in progress. Formally:
+ *  nic.rd.state <> rd_idle /\ nic.rx.state = rx_idle.
+ *
+ * The arguments are the environment and the current nic state and the returned
+ * value is a triple with the new nic state, a potential memory request, and
+ * a boolean flag indicating whether the NIC is asserting an interrupt.
+ */
+
+scheduler (env : environment) (nic : nic_state) =
+  if nic.dead then
+    (nic, NONE, nic.interrupt)
+  else
+    let (nic', mr') =
+      case env.scheduler of
+        | initialize => (if it_enable nic then it_transition nic else nic, NONE)
+        | transmit => if tx_enable nic then tx_transition env nic else (nic, NONE)
+        | receive => if rx_enable nic then rx_transition env nic else (nic, NONE)
+        | teardown_transmission => (if td_enable nic then td_transition env nic else nic, NONE)
+        | teardown_reception => (if rd_enable nic then rd_transition env nic else nic, NONE)
+    in
+    (nic', mr', nic.interrupt)

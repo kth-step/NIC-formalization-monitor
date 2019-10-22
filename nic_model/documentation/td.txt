@@ -1,0 +1,145 @@
+/*
+ *	The functions below describe the transmission teardown operations of
+ *	the NIC. These operations terminate the transmission operations of the NIC.
+ *	The transmission teardown operations of the NIC are described by the
+ *	transmission teardown automaton, which becomes active or pending when
+ *	TX_TEARDOWN is written to zero, depending on whether the transmission
+ *	automaton is active when that write occurs. The transmission teardown
+ *	automaton can start as soon as the transmission automaton has finished the
+ *	processing of the frame currently being transmitted.
+ *
+ *	When the teardown automaton can perform its transitions
+ *	nic.tx.current_bd_pa points to the first buffer descriptor that has not been
+ *	processed by the transmission automaton after the transmission automaton
+ *	became idle. If there is no such unused buffer descriptor (the transmission
+ *	queue has been completely processed), then nic.tx.current_bd_pa is zero. If
+ *	an unused buffer descriptor exists, then some of its fields get modified by
+ *	this transmission teardown automaton.
+ *
+ *	The sequence of operations described by the transmission teardown automaton
+ *	is:
+ *	1.	Non-deterministically sets the EOQ bit in the first unused buffer
+ *		descriptor, if there is one.
+ *	2.	Sets the teardown bit in the first unused buffer descriptor, if it
+ *		there is one.
+ *	3.	Clears TX0_HDP and the ownership bit in the first unused buffer
+ *		descriptor, if there is one.
+ *	4.	Writes the teardown acknowledgement code 0xFFFFFFFC in TX0_CP.
+ *
+ *	The transmission teardown automaton has five states:
+ *	*td_idle: This state represents the state of the physical NIC when the
+ *	 physical NIC has not been instructed to perform a transmission teardown.
+ *	*td_set_eoq: This state represents the state of the physical NIC when the
+ *	 physical NIC has been instructed to perform a transmission teardown and
+ *	 either has not started the teardown operations, waiting for the completion
+ *	 of the transmission of the current frame, or is setting the EOQ bit of the
+ *	 first unused buffer descriptor following the last buffer descriptor of the
+ *	 most recently transmitted frame.
+ *	*td_set_td: This state represents the state of the physical NIC when the
+ *	 physical NIC is setting the teardown bit of the first unused buffer
+ *	 descriptor following the last buffer descriptor of the most recently
+ *	 transmitted frame.
+ *	*td_clear_owner_and_hdp: This state represents the state of the physical
+ *	 NIC when the physical NIC is clearing the ownership bit of the first
+ *	 unused buffer descriptor following the last buffer descriptor of the most
+ *	 recently transmitted frame, and is clearing the TX0_HDP register.
+ *	*td_write_cp: This state represents the state of the physical NIC when the
+ *	 physical NIC is writing the acknowledgement code 0xFFFFFFFC to TX0_CP and
+ *	 potentially asserts an interrupt.
+ */
+
+-------------------------------------------------------------------------------
+/*
+ *	Applied by nic_execute when the NIC transmission teardown automaton shall
+ *	perform its next transition.
+ */
+(nic_state, mem_req) td_transition(nic : nic_state, env : env_type) ≝
+    case nic.td.state of
+    | td_idle =>
+		nic.dead := true
+		return (nic, ⊥)
+    | td_set_eoq =>
+		(td_1set_eoq(nic, env), ⊥)
+	| td_set_td =>
+		(td_2set_td(nic), ⊥)
+	| td_clear_owner_and_hdp =>
+		(td_3clear_owner_and_hdp(nic), ⊥)
+	| td_write_cp =>
+		(td_4write_cp(nic, env), ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the EOQ bit non-deterministically since it is not specified by the NIC
+ *	specification whether this operation is actually performed during
+ *	teardowns. From tests on the hardware, it can be seen that the bit is set.
+ *	As a compromise between actual implementation and the specification, it is
+ *	set non-deterministically. If the EOQ bit shall not be set then no hardware
+ *	operations are described by this function and therefore it applies the next
+ *	transition function (td_2set_td).
+ */
+nic_state td_1set_eoq(nic : nic_state, env : env_type) ≝
+	if env.td.set_eoq ∧ nic.tx.current_bd_pa ≠ 0 then
+		nic.td.state := td_set_td
+		nic.regs.CPPI_RAM(nic.tx.current_bd_pa - 0x4A10_2000 + 15)[4] := 1
+		return nic
+	else
+		return td_2set_td(nic)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the teardown bit of the potentially first unused buffer descriptor in
+ *	the transmission queue. If no such buffer descriptor exists, the next
+ *	transition function (td_3clear_owner_and_hdp) is applied since then no
+ *	hardware work is described by this function.
+ */
+nic_state td_2set_td(nic : nic_state) ≝
+	if nic.tx.current_bd_pa ≠ 0 then
+		nic.td.state := td_clear_owner_and_hdp
+		nic.regs.CPPI_RAM(nic.tx.current_bd_pa - 0x4A10_2000 + 15)[3] := 1
+		return nic
+	else
+		return td_3clear_owner_and_hd(nic)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Clears TX0_HDP and the ownership bit of the potentially existing first
+ *	unused buffer descriptor. This is done atomically to be consistent with the
+ *	transmission automaton, also performing these two operations atomically.
+ *	This indicates to software that the teardown bit is valid since the
+ *	ownership bit is cleared when the NIC has finished the processing of a
+ *	buffer descriptor.
+ */
+nic_state td_3clear_owner_and_hdp(nic : nic_state) ≝
+	nic.td.state := td_write_cp
+	nic.regs.TX0_HDP := 0
+
+	if nic.tx.current_bd_pa ≠ 0 then
+		nic.regs.CPPI_RAM(nic.tx.current_bd_pa - 0x4A10_2000 + 15)[5] := 0
+
+	//Both current_bd_pa and sop_bd_pa are cleared to keep them synchronized.
+	nic.tx.current_bd_pa := 0
+	nic.tx.sop_bd_pa := 0
+
+	return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets TX0_CP to the teardown completion code and enters the idle state.
+ *
+ *	A reception teardown interrupt is asserted non-deterministically since the
+ *	interrupt related registers are not modeled.
+ */
+nic_state td_4write_cp(nic : nic_state, env : env_type) ≝
+	nic.td.state := td_idle
+	nic.regs.TX0_CP := 0xFFFFFFFC
+
+	if env.td.assert_interrupt then
+		nic.tx.interrupt := true
+		nic.interrupt := true
+
+	return nic
+-------------------------------------------------------------------------------

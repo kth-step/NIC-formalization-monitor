@@ -1,0 +1,47 @@
+-------------------------------------------------------------------------------
+/*
+ *	@nic: The state of the NIC that determines the content of the NIC register to read.
+ *
+ *	@physical_address: word32. The physical address of the NIC register to read.
+ *
+ *	@l: ndl. Lists with non-deterministic values and choices.
+ *
+ *	If @physical address is not word aligned, then the NIC enters a dead state.
+ *	Also, if the register at @physical_address is not modeled, then a
+ *	non-deterministically chosen 32-bit value is returned.
+ */
+(nic_state, word32) read_nic_register(nic_state nic, word32 physical_address, ndl l) ≝
+	if physical_address[1:0] ≠ 0 then	//Checks word alignment.
+		nic.dead := true
+		return (nic, 0)
+	else if physical_address = 0x4A10_0808 then
+		return (nic, nic.regs.TX_TEARDOWN)	//TX_TEARDOWN is read as zero. Never modified by the model.
+	else if physical_address = 0x4A10_0818 then
+		return (nic, nic.regs.RX_TEARDOWN)	//RX_TEARDOWN is read as zero. Never modified by the model.
+	else if physical_address = 0x4A10_081C then
+		return (nic, nic.regs.CPDMA_SOFT_RESET)
+	else if physical_address = 0x4A10_0820 then
+		return (nic, nic.regs.DMACONTROL)
+	else if physical_address = 0x4A10_0828 then
+		return (nic, nic.regs.RX_BUFFER_OFFSET)
+	else if physical_address = 0x4A10_0A00 then
+		return (nic, nic.regs.TX0_HDP)
+	else if physical_address = 0x4A10_0A20 then
+		return (nic, nic.regs.RX0_HDP)
+	else if physical_address = 0x4A10_0A40 then
+		return (nic, nic.regs.TX0_CP)
+	else if physical_address = 0x4A10_0A60 then
+		return (nic, nic.regs.RX0_CP)
+	//Makes sure that the whole word is within CPPI_RAM by checking that the third
+	//byte is within the upper limit. This is done by subtracting the upper limit by three.
+	else if 0x4A10_2000 ≤ physical_address ∧ physical_address < 0x4A10_4000 - 0x3 then
+		return (nic, nic.regs.CPPI_RAM(physical_address - 0x4A10_2000 + 3) ::
+						nic.regs.CPPI_RAM(physical_address - 0x4A10_2000 + 2) ::
+						nic.regs.CPPI_RAM(physical_address - 0x4A10_2000 + 1) ::
+						nic.regs.CPPI_RAM(physical_address - 0x4A10_2000))
+	//Reading a non-modeled NIC register results in an arbitrary value.
+	else
+		word32 register := l.register_read.read_nic_register[nic.i.register_read.read_nic_register]
+		nic.i.register_read.read_nic_register :+= 1
+		return (nic, register)
+-------------------------------------------------------------------------------

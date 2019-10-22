@@ -1,0 +1,483 @@
+/*
+ * These are the functions of the NIC model that describe writes to NIC
+ * registers. The function that the device model framework shall apply to model
+ * a write to a NIC register is write_nic_register with the arguments being the
+ * current NIC state, the physical address of the register to write, and the
+ * value to write to the NIC register.
+ *
+ * A write to a NIC register might cause a NIC automaton to leave its idle
+ * state and entering a state from which it can perform an autonomous
+ * transition, which occurs as determined by the device model framework.
+ */
+
+-------------------------------------------------------------------------------
+/*
+ * @nic: The NIC state the NIC model currently is in.
+ *
+ * @physical_address: The physical address of the NIC register to write.
+ *
+ * @value: The value to write to the NIC register at the physical address
+ * @physical_address.
+ *
+ * @env: Lists with values reflecting the external state of the environment.
+ *
+ * If the given NIC state is not in a dead state, @physical_address is 32-bit
+ * word aligned, and no non-modeled HDP register is written with a non-zero
+ * value (which causes the NIC model to enter a dead state since transmission
+ * and reception channels 1 through 7 are not modeled, only 0), then @value is
+ * written to the register at having the physical address @physical_address.
+ * Otherwise the NIC model either does nothing or enters a dead state. The
+ * resulting NIC state of the NIC register write is returned.
+ */
+nic_state write_nic_register(nic_state nic, word32 physical_address, word32 value, environment env) ≝
+  if ¬nic.dead then
+    if physical_address[1:0] ≠ 0 then	//Checks word alignment.
+      nic.dead := true
+    else if ((0x4A10_0A00 < physical_address ∧ physical_address < 0x4A10_0A20) ∨
+             (0x4A10_0A20 < physical_address ∧ physical_address < 0x4A10_0A40)) ∧
+            value ≠ 0 then	//Writing a non-modeled HDP register with a non-zero value.
+      nic.dead := true
+    else
+      if physical_address = 0x4A10_0808 then
+        nic := write_tx_teardown(nic, value[2:0])
+      else if physical_address = 0x4A10_0818 then
+        nic := write_rx_teardown(nic, value[2:0])
+      else if physical_address = 0x4A10_081C then
+        nic := write_cpdma_soft_reset(nic, value[0])
+      else if physical_address = 0x4A10_0820 then
+        nic := write_dmacontrol(nic, value[15:0])
+      else if physical_address = 0x4A10_0828 then
+        nic := write_rx_buffer_offset(nic, value[15:0])
+      else if physical_address = 0x4A10_0A00 then
+        nic := write_tx0_hdp(nic, value, env.regs.tx0_hdp_value)
+      else if physical_address = 0x4A10_0A20 then
+        nic := write_rx0_hdp(nic, value, env.regs.rx0_hdp_value)
+      else if physical_address = 0x4A10_0A40 then
+        nic := write_tx0_cp(nic, value, env.regs.tx_interrupt)
+      else if physical_address = 0x4A10_0A60 then
+        nic := write_rx0_cp(nic, value, env.regs.rx_interrupt)
+      else if 0x4A10_2000 ≤ physical_address ∧ physical_address < 0x4A10_4000 then
+        nic := write_cppi_ram(nic, physical_address, value)
+      //Accesses to non-modeled NIC registers have no effect.
+
+  return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	If the NIC has not been initialized or is currently being initialized, or
+ *	the transmission teardown operations are being performed, or the channel to
+ *	teardown is not zero, then a write to TX_TEARDOWN is undefined. The reasons
+ *	are that the result of the first two cases are unspecified by the NIC
+ *	specification, and only transmission DMA channel zero is modeled. Otherwise
+ *	the write takes effect by setting nic.td.state = td_set_eoq. The CPU cannot
+ *	modify the contents of this register.
+ */
+nic_state write_tx_teardown(nic_state nic, word3 value) ≝
+	if nic.it.state ≠ it_initialized ∨ nic.td.state ≠ td_idle then
+		nic.dead := true
+	else
+		if value ≠ 0 then
+			nic.dead := true
+		else
+			//Makes the transmit teardown automaton active or pending,
+			//depending on whether the transmission automaton is active.
+			nic.td.state := td_set_eoq
+
+	return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	If the NIC has not been initialized or is currently being initialized, or
+ *	the transmission teardown operations are being performed, or the channel to
+ *	teardown is not zero, then a write to RX_TEARDOWN is undefined. The reasons
+ *	are that the result of the first two cases are unspecified by the NIC
+ *	specification, and only reception DMA channel zero is modeled. Otherwise
+ *	the write takes effect by making the reception teardown automaton non-idle
+ *	(by setting nic.rd.state = rd_set_sop). The CPU cannot modify the contents
+ *	of this register.
+ */
+nic_state write_rx_teardown(nic_state nic, value word3) ≝
+	if nic.it.state ≠ it_initialized ∨ nic.rd.state ≠ rd_idle then
+		nic.dead := true
+	else
+		if value ≠ 0 then
+			nic.dead := true
+		else
+			nic.rd.state := rd_set_sop
+
+	return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ * If any of the following conditions hold, writes to the CPDMA_SOFT_RESET
+ * register cause the NIC model to enter a dead state (due to undefined
+ * operation):
+ * *Initialization has never been performed and the bit value to write is not
+ *  one. The NIC specification specifies that software shall write a one the
+ *  first time this register is written.
+ * *Initialization is in progress (nic.it.state <> it.idle).
+ * *Initialization has been performed and is not in progress, the value to write
+ *  is one, and transmission or reception teardown operations are in progress.
+ *
+ * If the write is defined, then nic.it.state is set to it_reset to make the
+ * initialization automaton active, or pending if it must wait until the
+ * transmission and reception automata have finished the processing of their
+ * currently processed frames. Also, the boolean variables keeping track of the
+ * initialization of the HDP and CP registers are falsified.
+ *
+ * Initialization consists of resetting the CPDMA logic and clearing the HDP and
+ * CP registers.
+ */
+nic_state write_cpdma_soft_reset(nic_state nic, word1 value) ≝
+  case nic.it.state of
+  | it_after_power_on => //initialization has never been performed.
+      if value = 0 then  //Writing zero causes a transition to a dead state.
+        nic.dead := true
+      else
+        //Writes CPDMA_SOFT_RESET to indicate that the reset is in progress.
+        nic.regs.CPDMA_SOFT_RESET := 1
+        //The initialization automaton is set to active.
+        nic.it.state := it_reset
+        //Falsifies the flags tracking initialization of HDP and CP registers.
+        nic.it.tx0_hdp_initialized := false
+        nic.it.rx0_hdp_initialized := false
+        nic.it.tx0_cp_initialized := false
+        nic.it.rx0_cp_initialized := false
+  | it_reset =>  //Resetting while in progress is unspecified.
+      nic.dead := true
+  | it_initialize_hdp_cp =>  //Resetting while in progress is unspecified.
+      nic.dead := true
+  | it_idle =>  //Initialization has been done and is not in progress.
+      //Performing reset while teardown operations are performed is unspecified.
+      if value = 1 ∧ (nic.td.state <> td_idle ∨ nic.rd.state <> rd_idle) then
+        nic.dead := true
+      else if value = 1 then  //The reset operations shall be initiated.
+        nic.regs.CPDMA_SOFT_RESET := 1
+        nic.it.state := it_reset
+        nic.it.tx0_hdp_initialized := false
+        nic.it.rx0_hdp_initialized := false
+        nic.it.tx0_cp_initialized := false
+        nic.it.rx0_cp_initialized := false
+      //If value is zero, then nothing needs to be done, since the current state
+      //is it_idle, meaning that CPDMA_SOFT_RESET is already zero, and writing
+      //zero to CPDMA_SOFT_RESET has no effect.
+
+  return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *  Sets the DMACONTROL register except bits 1 and 2 which cause the NIC model
+ *  to enter a dead state. The reason for this is that these bits determine how
+ *  the ownership, buffer offset and buffer length fields of receive buffer
+ *  descriptors are modified by the NIC. These two bits must always be zero
+ *  since other behavior is not modeled. If the NIC has not been reset or is
+ *  being initialized, then the NIC model enters a dead state. For simplicity
+ *  no bit is allowed to be written.
+ */
+nic_state write_dmacontrol(nic_state nic, word16 value) ≝
+  if nic.it.state <> it_initialized ∨ value ≠ 0 then
+    nic.dead := true
+
+  return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ * Writes the RX_BUFFER_OFFSET register, which determines the number of skipped
+ * initial bytes of the buffer of the SOP receive buffer descriptor. If
+ * initialization has not been peformed or is in progress, then the effect of
+ * the write is undefined.
+ */
+nic_state write_rx_buffer_offset(nic_state nic, word16 value) ≝
+  if nic.it.state <> it_initialized then
+    dead := true
+  else
+    nic.regs.RX_BUFFER_OFFSET := value	
+
+  return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the TX0_HDP register. This function describes the following behavior
+ *  depending on the state of the initialization automaton:
+ *  *after_powered_on: The CPU must not write TX0_HDP before the NIC has been
+ *   reset. Therefore the NIC enters a dead state if TX0_HDP is written when
+ *   the initialization automaton is in the state after_powered_on.
+ *  *resetting: The CPU must not write TX0_HDP when the NIC is performing the
+ *   reset operation. Therefore the NIC enters a dead state if TX0_HDP is
+ *   written when the initialization automaton is in the state resetting.
+ *  *init_hdp_cp: The NIC is waiting for the CPU to clear the HDP and CP
+ *   registers. If the CPU writes any other value than zero to TX0_HDP when the
+ *   initialization automaton is in the state init_hdp_cp the NIC model enters
+ *   the dead state.
+ *  *initialized: The NIC has been initialized and initialization is not in
+ *   progress. If TX0_HDP ≠ 0 or the transmission teardown automaton is not
+ *   idle (NIC specification does not specify what happens when TX0_HDP is
+ *   written and transmission teardown is in progress) then the NIC model
+ *   enters the dead state. Otherwise, TX0_HDP is set to the argument value
+ *   tx0_hdp_value (which is non-deterministically chosen), current_bd_pa to
+ *   bd_pa and the next state to fetch_next_bd (this last assignment is only
+ *   performed if the transmission automaton is in the state idle).
+ */
+nic_state write_tx0_hdp(nic : nic_state, bd_pa : word32, env : environment) ≝
+	//NIC has never been initialized: CPU must trigger the reset operation of
+	//the NIC before the CPU can write TX0_HDP.
+	if nic.init.state = after_powered_on then
+		nic.dead ≔ true
+	//NIC is performing the reset operation: CPU must not write TX0_HDP.
+	else if nic.init.state = resetting then
+		nic.dead ≔ true
+	//NIC is waiting for CPU to clear HDP and CP registers.
+	else if nic.init.state = init_hdp_cp then
+		//CPU must write zero to TX0_HDP.
+		if bd_pa ≠ 0 then
+			nic.dead ≔ true
+		//Clears TX0_HDP and transitions to initializeed if initialized.
+		else
+			//Since bd_pa = 0, bd_pa is replaced by 0.
+			nic.regs.TX0_HDP ≔ 0
+			//Synchronizes sop_bd_pa, current_bd_pa and TX0_HDP. If TX0_HDP = 0
+			//(meaning transmission is idle or is about to write TX0_CP) then
+			//current_bd_pa should be zero as well since no buffer descriptor
+			//is processed.
+			nic.tx.current_bd_pa ≔ 0
+			nic.tx.sop_bd_pa ≔ 0
+			//TX0_HDP is initialized.
+			nic.init.tx0_hdp_initialized ≔ true
+
+			//Checks whether initialization is complete.
+			if nic.init.tx0_hdp_initialized ∧ nic.init.rx0_hdp_initialized ∧ nic.init.tx0_cp_initialized ∧ nic.init.rx0_cp_initialized then
+				nic.init.state ≔ initialized
+
+	//NIC has been initialized and initialization is not in progress.
+	else if nic.init.state = initialized then
+		//Writing TX0_HDP when TX0_HDP ≠ 0 is an error according to the NIC
+		//specification.
+		if nic.regs.TX0_HDP ≠ 0 then
+			nic.dead ≔ true
+		//If the transmission teardown automaton is not idle, then the NIC
+		//model enters a dead state.
+		else if nic.tx_td.state ≠ idle then
+			nic.dead ≔ true
+		//The CPU is writing a non-zero value to TX0_HDP.
+		else if bd_pa ≠ 0 then
+			//TX0_HDP is set to an unknown value since the specification does
+			//not say how TX0_HDP changes its value during transmission. Since
+			//TX0_HDP = 0 indicates that no transmission is in progress, the
+			//value to assign TX0_HDP must be non-zero. If a zero value is
+			//chosen, TX0_HDP is set to one (non-deterministically chosen value
+			//incremented by one).
+			if env.reg.tx0_hdp_value = 0 then
+				nic.regs.TX0_HDP ≔ 1
+			else
+				nic.regs.TX0_HDP ≔ env.reg.tx0_hdp_value
+
+			//current_bd_pa is set to the physical address of the new buffer
+			//descriptor.
+			nic.tx.current_bd_pa ≔ bd_pa
+
+			//sop_bd_pa is set to the physical address of the new buffer
+			//descriptor to keep sop_bd_pa synchronized with current_bd_pa.
+			nic.tx.sop_bd_pa ≔ bd_pa
+
+			//A SOP buffer descriptor is expected to be the first buffer
+			//descriptor in the transmission queue.
+			nic.tx.expects_sop ≔ true
+
+			//TX0_HDP is cleared by clear_owner_and_hdp, leaving the
+			//transmission automaton in the state write_cp. If the CPU writes
+			//TX0_HDP when the transmission automaton is in the state write_cp,
+			//then the state of the transmission automaton must not be set to
+			//fetch_next_bd. If the state of the transmission automaton is set
+			//to fetch_next_bd, then TX0_CP will not be written, which is
+			//incorrect. Therefore, nic.tx.state is only set to fetch_next_bd
+			//if it is in the state idle. The transition function write_cp will
+			//then see that nic.tx.current_bd_pa ≠ 0 and set the nic in the state
+			//fetch_next_bd.
+			if nic.tx.state = idle then
+				nic.tx.state ≔ fetch_next_bd
+
+		//If the TX0_HDP register is zero and is set to zero nothing happens.
+
+	return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *  Writes the RX0_HDP register. This function describes the following behavior
+ *  depending on the state of the initialization automaton:
+ *  *after_powered_on: The CPU must not write RX0_HDP before the NIC has been
+ *   reset. Therefore the NIC enters a dead state if RX0_HDP is written when
+ *   the initialization automaton is in the state after_powered_on.
+ *  *resetting: The CPU must not write RX0_HDP when the NIC is performing the
+ *   reset operation. Therefore the NIC enters a dead state if RX0_HDP is
+ *   written when the initialization automaton is in the state resetting.
+ *  *it_initialize_hdp_cp: The NIC is waiting for the CPU to clear the HDP and CP
+ *   registers. If the CPU writes any other value than zero to RX0_HDP when the
+ *   initialization automaton is in the state it_initialize_hdp_cp the NIC model enters
+ *   a dead state.
+ *  *initialized: The NIC has been initialized and initialization is not in
+ *   progress. If RX0_HDP ≠ 0 or the reception teardown automaton is not
+ *   idle (NIC specification does not specify what happens when RX0_HDP is
+ *   written and reception teardown is in progress) then the NIC model
+ *   enters the dead state. Otherwise, RX0_HDP is set to the argument 
+ *   rx0_hdp_value (being an "unknown" value since the value of the RX0_HDP
+ *   register is unspecified by the NIC specification while reception of a
+ *   frame is in progress), current_bd_pa to bd_pa and the next state to
+ *   fetch_next_bd (this last assignment is only performed if the transmission
+ *   automaton is in the state idle).
+ */
+nic_state write_rx0_hdp(nic : nic_state, bd_pa : word32, rx0_hdp_value : word32) ≝
+  //NIC has never been initialized: CPU must trigger the reset operation of
+  //the NIC before the CPU can write RX0_HDP.
+  if nic.it.state = after_powered_on then
+		nic.dead ≔ true
+  //NIC is performing the reset operation: CPU must not write RX0_HDP.
+  else if nic.it.state = resetting then
+		nic.dead ≔ true
+  //NIC is waiting for CPU to clear HDP and CP registers.
+  else if nic.it.state = it_initialize_hdp_cp then
+    //CPU must write zero to RX0_HDP.
+    if bd_pa ≠ 0 then
+      nic.dead ≔ true
+    //Clears RX0_HDP and enters the state initialized if all HDP and CP
+    //registers have been initialized.
+    else
+      //Since bd_pa = 0, bd_pa is replaced by 0.
+      nic.regs.RX0_HDP ≔ 0
+      //RX0_HDP is initialized.
+      nic.it.rx0_hdp_initialized ≔ true
+
+      //Synchronizes current_bd_pa, sop_bd_pa and RX0_HDP. If RX0_HDP = 0
+      //(meaning reception is idle or is about to write RX0_CP) then
+      //current_bd_pa and sop_bd_pa should be zero as well since no
+      //buffer descriptors are processed.
+      nic.rx.current_bd_pa ≔ 0
+      nic.rx.sop_bd_pa ≔ 0
+
+      //Checks whether initialization is complete.
+      if nic.it.tx0_hdp_initialized ∧ nic.it.rx0_hdp_initialized ∧ nic.it.tx0_cp_initialized ∧ nic.it.rx0_cp_initialized then
+        nic.it.state ≔ initialized
+
+  //NIC has been initialized and initialization is not in progress.
+  else if nic.it.state = initialized then
+    //Writing RX0_HDP when RX0_HDP ≠ 0 is an error according to the NIC
+    //specification.
+    if nic.regs.RX0_HDP ≠ 0 then
+      nic.dead ≔ true
+    //If the reception teardown automaton is not idle, then the NIC
+    //model enters a dead state.
+    else if nic.rx_td.state ≠ idle then
+      nic.dead ≔ true
+    //The CPU is writing a non-zero value to RX0_HDP. (Writing zero to
+    //RX0_HDP when RX0_HDP = 0 has no effect.)
+    else if bd_pa ≠ 0 then
+      //RX0_HDP is set to an unknown value since the specification does
+      //not say how RX0_HDP changes its value during reception. Since
+      //RX0_HDP = 0 indicates that no transmission is in progress, the
+      //value to assign RX0_HDP must be non-zero. If zero is chosen,
+      //RX0_HDP is set to one (the "unknown" value incremented by one).
+      if rx0_hdp_value = 0 then
+        nic.regs.RX0_HDP ≔ 1
+      else
+        nic.regs.RX0_HDP ≔ rx0_hdp_value
+      //current_bd_pa is set to the physical address of the new buffer
+      //descriptor.
+      nic.rx.current_bd_pa ≔ bd_pa
+
+      //This new buffer descriptor is the first one in the queue and will
+      //be used as a SOP for the next frame to be received.
+      nic.rx.sop_bd_pa ≔ bd_pa
+
+  return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ * The same initialization requirements apply for writing TX0_CP as for the
+ * HDP registers. If the requirements are not satisfied then the NIC model
+ * enters a dead state. Also, since it is unknown how the initialization of
+ * the CP registers affects interrupts, the interrupts are deasserted
+ * "non-deterministically" during initialization.
+ */
+nic_state write_tx0_cp(nic_state nic, word32 bd_pa, environment env) ≝
+  if nic.it.state <> it_initialized then
+    if bd_pa = 0 ∧ nic.it.state = it_initialize_hdp_cp then
+      //Zero replaces bd_physical_address, since bd_physical_address is
+      //zero according to the test.
+      nic.regs.TX0_CP := 0
+      nic.it.tx0_cp_initialized := true
+
+      if env.regs.tx0_cp_deassert_interrupt then
+        nic.tx.interrupt := false
+	    if ¬nic.rx.interrupt then
+	      nic.interrupt := false
+
+      if nic.it.tx0_hdp_initialized ∧ nic.it.rx0_hdp_initialized ∧ nic.it.tx0_cp_initialized ∧ nic.it.rx0_cp_initialized then
+        nic.it.state := it_initialized
+    else
+      nic.dead := true
+  else
+    //Initialization is complete and not in progress, meaning the completion pointer
+    //register can be written to any value. The NIC deasserts transmission
+    //completion interrupts if the value written is equal to the current CP
+    //content.
+    if nic.regs.TX0_CP = bd_pa then
+      nic.tx.interrupt := false
+      if ¬nic.rx.interrupt then
+        nic.interrupt := false
+
+  return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Is identical to write_tx0_cp but for reception.
+ */
+nic_state write_rx0_cp(nic_state nic, word32 bd_pa, environment env) ≝
+  if nic.it.state <> it_initialized then
+    if bd_pa = 0 ∧ nic.it.state = it_initialize_hdp_cp then
+      nic.regs.RX0_CP := 0
+      nic.it.rx0_cp_initialized := true
+
+      if env.regs.rx0_cp_deassert_interrupt then
+        nic.rx.interrupt := false
+	if ¬nic.tx.interrupt then
+          nic.interrupt := false
+
+      if nic.it.tx0_hdp_initialized ∧ nic.it.rx0_hdp_initialized ∧ nic.it.tx0_cp_initialized ∧ nic.it.rx0_cp_initialized then
+        nic.it.state := it_initialized
+    else
+      nic.dead := true
+  else
+    if nic.regs.RX0_CP = bd_pa then
+      nic.rx.interrupt := false
+      if ¬nic.tx.interrupt then
+        nic.interrupt := false
+
+  return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ * Writes a 32-bit word to CPPI_RAM in little endian order: Less significant
+ * bytes of the 32-bit word are written at a lower address. This must be
+ * consistent with how the NIC reads bytes from CPPI_RAM.
+ *
+ * It is unspecified what happens if a next descriptor pointer field is written
+ * of a buffer descriptor currently being in use. For simplicity, such a write
+ * does not cause the NIC model to enter an undefined state.
+ */
+nic_state write_cppi_ram(nic_state nic, word32 cppi_ram_physical_address, word32 bd_word) ≝
+  nic.regs.CPPI_RAM(cppi_ram_physical_address - 0x4A10_2000) := bd_word[7:0]
+  nic.regs.CPPI_RAM(cppi_ram_physical_address - 0x4A10_2000 + 1) := bd_word[15:8]
+  nic.regs.CPPI_RAM(cppi_ram_physical_address - 0x4A10_2000 + 2) := bd_word[23:16]
+  nic.regs.CPPI_RAM(cppi_ram_physical_address - 0x4A10_2000 + 3) := bd_word[31:24]
+
+  return nic
+-------------------------------------------------------------------------------

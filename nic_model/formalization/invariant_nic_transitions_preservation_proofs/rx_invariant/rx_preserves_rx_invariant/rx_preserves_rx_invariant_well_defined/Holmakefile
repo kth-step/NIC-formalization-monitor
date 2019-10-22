@@ -1,0 +1,1 @@
+INCLUDES=../../../../invariant/rx ../../../../invariant_preservation_lemmas/automata/rx ../../../../helper_tactics ../../../../invariant_preservation_lemmas/invariant/rx/rx_invariant_well_defined ../../../../automata_auxiliary_definitions_lemmas/state_lemmas ../../../../automata_auxiliary_definitions_lemmas/transition_lemmas ../../../../automata_auxiliary_definitions_lemmas/lib

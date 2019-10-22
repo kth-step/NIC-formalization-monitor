@@ -1,0 +1,1 @@
+INCLUDES=rx_invariant_memory_writable rx_invariant_well_defined ../../../invariant/rx ../../../automata_auxiliary_definitions_lemmas/transition_definitions ../../../helper_tactics

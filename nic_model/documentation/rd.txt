@@ -1,0 +1,171 @@
+/*
+ *	This following step functions describe the transitions of the reception
+ *	teardown automaton and the reception teardown operations of the NIC. These
+ *	operations disable frame reception of the NIC. The reception teardown
+ *	automaton becomes active or pending when zero is written to RX_TEARDOWN,
+ *	and can perform its transitions when the reception automaton has become
+ *	idle.
+ *
+ *	When the reception automaton becomes active or pending nic.rx.current_bd_pa
+ *	contains the physical address of first buffer descriptor of the receive
+ *	queue that is unused, if it exists. Otherwise nic.rx.current_bd_pa is zero.
+ *	The reception teardown automaton writes certain fields of this buffer
+ *	descriptor. The teardown automaton has six step functions performing the
+ *	following operations:
+ *	1.	Non-deterministically sets the SOP bit in the buffer descriptor.
+ *	2.	Non-deterministically sets the EOP bit in the buffer descriptor.
+ *	3.	Non-deterministically sets the EOQ bit in the buffer descriptor.
+ *	4.	Sets the teardown bit in the buffer descriptor.
+ *	5.	Clears RX0_HDP and the ownership bit in the buffer descriptor.
+ *	6.	Writes the teardown acknowledgement code 0xFFFFFFFC in RX0_CP.
+ *
+ *	The reason why steps 1, 2 and 3 modify the buffer descriptor
+ *	non-deterministically is because the hardware sets the SOP, EOP and EOQ
+ *	bits but these operations are not specified to occur in the NIC
+ *	specification.
+ *
+ *	The reception teardown automaton has seven states:
+ *	*rd_idle: This state represents the state of the physical NIC when the
+ *	 physical NIC has not been instructed to perform reception teardown.
+ *	*rd_set_sop: This state represents the state of the physical NIC when the
+ *	 physical NIC has been instructed to perform reception teardown and either
+ *	 has not started the teardown operations, waiting for the completion
+ *	 of the reception of the current frame, or is currently setting, the SOP
+ *	 bit of the first unused buffer descriptor following the last buffer
+ *	 descriptor of the most recently received frame.
+ *	*rd_set_eop: This state represents the state of the physical NIC when the
+ *	 physical NIC is setting the EOP bit of the first unused buffer descriptor
+ *	 following the last buffer descriptor of the most recently received frame.
+ *	*rd_set_eoq: This state represents the state of the physical NIC when the
+ *	 physical NIC is setting the EOQ bit of the first unused buffer descriptor
+ *	 following the last buffer descriptor of the most recently received frame.
+ *	*rd_set_td: This state represents the state of the physical NIC when the
+ *	 physical NIC is setting the teardown bit of the first unused buffer
+ *	 descriptor following the last buffer descriptor of the most recently
+ *	 received frame.
+ *	*rd_clear_owner_and_hdp: This state represents the state of the physical
+ *	 NIC when the physical NIC is clearing the ownership bit of the first
+ *	 unused buffer descriptor following the last buffer descriptor of the most
+ *	 recently received frame, and is clearing the RX0_HDP register.
+ *	*rd_write_cp: This state represents the state of the physical NIC when the
+ *	 physical NIC is writing the acknowledgement code 0xFFFFFFFC to RX0_CP and
+ *	 potentially asserts an interrupt.
+ */
+
+-------------------------------------------------------------------------------
+/*
+ *	The transition function of the reception teardown automaton and is called
+ *	by nic_execute when the reception teardown automaton shall perform the next
+ *	transition of the NIC model.
+ */
+(nic_state, mem_req) rd_transition(nic : nic_state, env : env_type) ≝
+ 	case nic.rd.state of
+	| rd_idle =>
+		nic.dead := true
+		return (nic, ⊥)
+	| rd_set_sop =>
+		return (rd_1set_sop(nic, env), ⊥)
+	| rd_set_eop =>
+		return (rd_2set_eop(nic, env), ⊥)
+	| rd_set_eoq =>
+		return (rd_3set_eoq(nic, env), ⊥)
+	| rd_set_td =>
+		return (rd_4set_td(nic), ⊥)
+	| rd_clear_owner_and_hdp =>
+		return (rd_5clear_owner_and_hdp(nic), ⊥)
+	| rd_write_cp =>
+		return (rd_6write_cp(nic, env), ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the SOP bit non-deterministically since it is not specified by the NIC
+ *	specification that this operation is actually performed.
+ */
+nic_state rd_1set_sop(nic : nic_state, env : env_type) ≝
+	if env.rd.set_sop ∧ nic.rx.current_bd_pa ≠ 0 then
+		nic.rd.state := rd_set_eop
+		nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 15)[7] := 1
+		return nic
+	else
+		return rd_2set_eop(nic, env)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the EOP bit non-deterministically since it is not specified by the NIC
+ *	specification that this operation is actually performed.
+ */
+nic_state rd_2set_eop(nic : nic_state, env : env_type) ≝
+	if env.rd.set_eop ∧ nic.rx.current_bd_pa ≠ 0 then
+		nic.rd.state := rd_set_eoq
+		nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 15)[6] := 1
+		return nic
+	else
+		return rd_3set_eoq(nic, env)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the EOQ bit non-deterministically since it is not specified by the NIC
+ *	specification that this operation is actually performed.
+ */
+nic_state rd_3set_eoq(nic : nic_state, env : env_type) ≝
+	if env.rd.set_eoq ∧ nic.rx.current_bd_pa ≠ 0 then
+		nic.rd.state := rd_set_td
+		nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 15)[4] := 1
+		return nic
+	else
+		return rd_4set_td(nic)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the teardown bit.
+ */
+nic_state rd_4set_td(nic : nic_state) ≝
+	if nic.rx.current_bd_pa ≠ 0 then
+		nic.rd.state := rd_clear_owner_and_hdp
+		nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 15)[3] := 1
+		return nic
+	else
+		return rd_5clear_owner_and_hdp(nic)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Clears RX0_HDP and the ownership bit atomically since that is how this pair
+ *	of operations are described by the reception automaton.
+ */
+nic_state rd_5clear_owner_and_hdp(nic : nic_state) ≝
+	nic.rd.state := rd_write_cp
+	nic.regs.RX0_HDP := 0
+
+	if nic.rx.current_bd_pa ≠ 0 then
+		nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 15)[5] := 0
+
+	nic.rx.current_bd_pa := 0
+	nic.rx.sop_bd_pa := 0
+
+	return nic
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the RX0_CP register to the teardown completion code, and
+ *	receive_teardown_step to zero to denote that the receive teardown automaton
+ *	has become idle.
+ *
+ *	A reception teardown interrupt is asserted non-deterministically since the
+ *	interrupt related registers are not modeled.
+ */
+nic_state rd_6write_cp(nic : nic_state, env : env_type) ≝
+	nic.regs.RX0_CP := 0xFFFFFFFC
+	nic.rd.state := rd_idle
+
+	if env.rd.assert_interrupt then
+		nic.rx.interrupt := true
+		nic.interrupt := true
+
+	return nic
+-------------------------------------------------------------------------------

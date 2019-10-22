@@ -1,0 +1,289 @@
+open HolKernel Parse boolLib bossLib;
+open helperTactics;
+open txInvariantWellDefinedTheory;
+open tx_4post_process_lemmasTheory;
+open tx_invariant_well_defined_lemmasTheory;
+open bd_listTheory;
+
+val _ = new_theory "tx_4post_process";
+
+val TX_post_process_PRESERVES_NOT_DEAD_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_NOT_DEAD nic'``,
+  REPEAT GEN_TAC THEN
+  REWRITE_TAC [TX_INVARIANT_WELL_DEFINED_def] THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NON_MODIFICATION_lemma)) THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_NON_MODIFICATION_TX_INVARIANT_NOT_DEAD_lemma)) THEN
+  ASM_REWRITE_TAC []);
+
+val TX_post_process_PRESERVES_BD_QUEUE_FINITE_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_BD_QUEUE_FINITE nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_BD_QUEUE_FINITE_lemma)) THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_BD_QUEUE_FINITE_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_BD_QUEUE_NO_OVERLAP_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_BD_QUEUE_NO_OVERLAP (tx_bd_queue nic')``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_BD_QUEUE_lemma)) THEN
+   RW_ASM_TAC ``TX_INVARIANT_WELL_DEFINED nic`` TX_INVARIANT_WELL_DEFINED_def THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_BD_QUEUE_TAIL_lemma)) THEN
+   REWRITE_TAC [TX_INVARIANT_BD_QUEUE_NO_OVERLAP_def] THEN
+   RW_ASM_TAC ``TX_INVARIANT_WELL_DEFINED nic`` TX_INVARIANT_WELL_DEFINED_def THEN
+   SPLIT_ASM_TAC THEN
+   RW_ASM_TAC ``TX_INVARIANT_BD_QUEUE_NO_OVERLAP (tx_bd_queue nic)`` TX_INVARIANT_BD_QUEUE_NO_OVERLAP_def THEN
+   ASM_RW_ASM_TAC ``tx_bd_queue nic = nic.tx.sop_bd_pa::tx_bd_queue nic'`` ``¬BD_LIST_OVERLAP (tx_bd_queue nic)`` THEN
+   MATCH_MP_ASM_IMP_TAC ``¬BD_LIST_OVERLAP (nic.tx.sop_bd_pa::tx_bd_queue nic')`` NO_OVERLAP_IMP_NO_OVERLAP_TAIL_lemma THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_BD_QUEUE_SOP_EOP_MATCH_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_BD_QUEUE_SOP_EOP_MATCH (tx_bd_queue nic') nic'.regs.CPPI_RAM``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_BD_QUEUE_SOP_EOP_MATCH_lemma)) THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_BD_QUEUE_SOP_EOP_MATCH_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_TX_STATE_NOT_BD_QUEUE_EMPTY_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_TX_STATE_NOT_BD_QUEUE_EMPTY nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_NOT_BD_QUEUE_EMPTY_lemma)) THEN
+   REWRITE_TAC [TX_INVARIANT_TX_STATE_NOT_BD_QUEUE_EMPTY_def] THEN
+   ASM_REWRITE_TAC [NOT_TX_BD_QUEUE_EMPTY_def]
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_TX_STATE_NOT_BD_QUEUE_EMPTY_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_CURRENT_BD_PA_EQ_SOP_BD_PA_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_CURRENT_BD_PA_EQ_SOP_BD_PA nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (GSYM (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_NON_MODIFICATION_SOP_BD_PA_lemma))) THEN
+   ASSUME_TAC (GSYM (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_NON_MODIFICATION_CURRENT_BD_PA_lemma))) THEN
+   REWRITE_TAC [TX_INVARIANT_CURRENT_BD_PA_EQ_SOP_BD_PA_def] THEN
+   RW_ASM_TAC ``TX_INVARIANT_WELL_DEFINED nic`` TX_INVARIANT_WELL_DEFINED_def THEN
+   SPLIT_ASM_TAC THEN
+   RW_ASM_TAC ``TX_INVARIANT_CURRENT_BD_PA_EQ_SOP_BD_PA nic`` TX_INVARIANT_CURRENT_BD_PA_EQ_SOP_BD_PA_def THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_CURRENT_BD_PA_EQ_SOP_BD_PA_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_BD_QUEUE_LOCATION_DEFINED_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (tx_bd_queue nic')``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_BD_QUEUE_lemma)) THEN
+   RW_ASM_TAC ``TX_INVARIANT_WELL_DEFINED nic`` TX_INVARIANT_WELL_DEFINED_def THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_BD_QUEUE_TAIL_lemma)) THEN
+   RW_ASM_TAC ``TX_INVARIANT_WELL_DEFINED nic`` TX_INVARIANT_WELL_DEFINED_def THEN
+   SPLIT_ASM_TAC THEN
+   ASM_RW_ASM_TAC ``tx_bd_queue nic = nic.tx.sop_bd_pa::tx_bd_queue nic'`` ``TX_INVARIANT_BD_QUEUE_LOCATION_DEFINED (tx_bd_queue nic)`` THEN
+   ASSUME_TAC (UNDISCH (SPECL [``nic.tx.sop_bd_pa``, ``tx_bd_queue nic'``] TX_INVARIANT_TAIL_BD_QUEUE_PRESERVES_BD_QUEUE_LOCATION_DEFINED_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_EXPECTS_SOP_EQ_CURRENT_BD_PA_SOP_STATE_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_EXPECTS_SOP_EQ_CURRENT_BD_PA_SOP_STATE nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL tx_4post_process_LAST_BD_PRESERVES_EXPECTS_SOP_EQ_CURRENT_BD_PA_SOP_STATE_lemma)) THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_INVARIANT_IMP_NEXT_STATE_EXPECTS_SOP_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_SOP_EOP_BD_QUEUE_NO_BUFFER_LENGTH_OVERFLOW_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_SOP_EOP_BD_QUEUE_NO_BUFFER_LENGTH_OVERFLOW (tx_bd_queue nic') nic'.regs.CPPI_RAM``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_SOP_EOP_BD_QUEUE_NO_BUFFER_LENGTH_OVERFLOW_lemma)) THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_SOP_EOP_BD_QUEUE_NO_BUFFER_LENGTH_OVERFLOW_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_SOP_EOP_BD_QUEUE_CONSISTENT_SUM_BUFFER_LENGTH_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_SOP_EOP_BD_QUEUE_CONSISTENT_SUM_BUFFER_LENGTH (tx_bd_queue nic') nic'.regs.CPPI_RAM``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_SOP_EOP_BD_QUEUE_CONSISTENT_SUM_BUFFER_LENGTH_lemma)) THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_SOP_EOP_BD_QUEUE_CONSISTENT_SUM_BUFFER_LENGTH_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_BD_QUEUE_CONFIGURATION_WELL_DEFINED_STATE_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_BD_QUEUE_CONFIGURATION_WELL_DEFINED_STATE nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_BD_QUEUE_CONFIGURATION_WELL_DEFINED_STATE_lemma)) THEN
+   ASM_REWRITE_TAC [TX_INVARIANT_BD_QUEUE_CONFIGURATION_WELL_DEFINED_STATE_def]
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_BD_QUEUE_CONFIGURATION_WELL_DEFINED_STATE_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+val TX_post_process_PRESERVES_CURRENT_BD_STATE_lemma = prove (
+  ``!nic nic'.
+    TX_STATE_POST_PROCESS nic /\
+    (nic' = tx_4post_process nic) /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_CURRENT_BD_STATE nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  Cases_on `LAST_BD nic.tx.current_bd` THENL
+  [
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_LAST_BD_PRESERVES_CURRENT_BD_STATE_lemma)) THEN
+   ASM_REWRITE_TAC []
+   ,
+   ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_NOT_LAST_BD_PRESERVES_CURRENT_BD_STATE_lemma)) THEN
+   ASM_REWRITE_TAC []
+  ]);
+
+
+
+
+
+
+(********************************************************************************)
+(******************INVARIANT_PRESERVED_BY_POST_PROCESS***************************)
+(********************************************************************************)
+
+val TX_post_process_PRESERVES_TX_INVARIANT_WELL_DEFINED_lemma = store_thm (
+  "TX_post_process_PRESERVES_TX_INVARIANT_WELL_DEFINED_lemma",
+  ``!nic nic'.
+    (nic' = tx_4post_process nic) /\
+    TX_STATE_POST_PROCESS nic /\
+    TX_INVARIANT_WELL_DEFINED nic
+    ==>
+    TX_INVARIANT_WELL_DEFINED nic'``,
+  REPEAT GEN_TAC THEN
+  DISCH_TAC THEN
+  SPLIT_ASM_TAC THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_NOT_DEAD_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_BD_QUEUE_FINITE_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_BD_QUEUE_NO_OVERLAP_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_BD_QUEUE_SOP_EOP_MATCH_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_TX_STATE_NOT_BD_QUEUE_EMPTY_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_CURRENT_BD_PA_EQ_SOP_BD_PA_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_BD_QUEUE_LOCATION_DEFINED_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_EXPECTS_SOP_EQ_CURRENT_BD_PA_SOP_STATE_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_SOP_EOP_BD_QUEUE_NO_BUFFER_LENGTH_OVERFLOW_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_SOP_EOP_BD_QUEUE_CONSISTENT_SUM_BUFFER_LENGTH_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_BD_QUEUE_CONFIGURATION_WELL_DEFINED_STATE_lemma)) THEN
+  ASSUME_TAC (CONJ_ANT_TO_HYP (SPEC_ALL TX_post_process_PRESERVES_CURRENT_BD_STATE_lemma)) THEN
+  ASM_REWRITE_TAC [TX_INVARIANT_WELL_DEFINED_def]);
+
+
+val _ = export_theory();
+

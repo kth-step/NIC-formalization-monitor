@@ -1,0 +1,938 @@
+/*
+ *	These transition functions describe the transitions of the reception
+ *	automaton. The reception automaton becomes active when a new frame is
+ *	received and becomes idle when that frame has been stored in memory and the
+ *	post-processing of its buffer descriptors is complete.
+ *
+ *	The reception automaton has 19 transition functions (20 with the transition
+ *	function applied to describe when a new frame is received). The NIC model
+ *	is designed such that each transition function describes one unit of
+ *	hardware work (i.e. one write of exactly one NIC register field or the
+ *	transfer of one byte to memory). However, all bytes of each buffer
+ *	descriptor are read simultaneously, and the RX_BUFFER_OFFSET register is
+ *	also read at this point. This description of buffer descriptor reads does
+ *	not omit any behavior compared to if each transition described one byte
+ *	read. The reason is that the reception automaton does not perform any
+ *	writes between the byte reads of a buffer descriptor. If some other system
+ *	component (e.g. CPU or transmission) writes a value in CPPI_RAM between two
+ *	byte reads of the reception automaton, then that write can be scheduled to
+ *	occur before the reception automaton reads the buffer descriptor and the
+ *	result would be the same.
+ *
+ *	The first five transition functions describe the processing of each buffer
+ *	descriptor that is used to store a received frame. The last fourteen
+ *	transition functions describe post-processing of the received frame. This
+ *	means that fields of the SOP and EOP buffer descriptors of the received
+ *	frame and the RX0_HDP and RX0_CP registers are written.
+ *
+ *	Before a buffer descriptor is added to the reception queue some of its
+ *	fields should be initialized as follows by the software:
+ *	*Next descriptor pointer: Written to the 32-bit aligned address of the next
+ *	 descriptor in the queue, or zero if it is the last buffer descriptor.
+ *	*Buffer pointer: Written to the byte aligned address of the buffer.
+ *	*Buffer offset: Cleared.
+ *	*Buffer length: Number of bytes in the buffer. Must be greater than the
+ *	 rx_buffer_offset value and greater than zero.
+ *	*SOP: Cleared.
+ *	*EOP: Cleared.
+ *	*Ownership: Set.
+ *	*EOQ: Cleared.
+ *
+ *	These properties are checked in the model to be on the safe side since the
+ *	NIC specification does not say what happens if buffer descriptors are not
+ *	initialized in this way. The NIC model therefore enters a dead state if the
+ *	initialization is incorrect.
+ *
+ *	When the hardware has stored a received frame in memory, it performs the
+ *	following operations on the fields of the SOP and EOP buffer descriptors of
+ *	the received frame:
+ *	*Buffer offset: Only valid in SOP buffer descriptors. Written to the value
+ *	 in the RX_BUFFER_OFFSET register.
+ *	*Buffer length: Overwritten in the EOP buffer descriptor of the received
+ *	 frame with the number of bytes stored in the last buffer of the frame.
+ *	 Overwritten in the SOP buffer descriptor of the received frame with the
+ *	 number of bytes stored in the first buffer of the received frame, and if
+ *	 this first buffer is filled then the value of this buffer length field is
+ *	 equal to the size of this first buffer minus the buffer offset field of
+ *	 this SOP buffer descriptor.
+ *	*SOP: Set in the SOP buffer descriptor of the received frame.
+ *	*EOP: Set in the EOP buffer descriptor of the received frame.
+ *	*Ownership: Cleared in the SOP buffer descriptor of the received frame.
+ *	*EOQ: Set when the current buffer descriptor is the last for the currently
+ *	 received frame (the EOP flag is also set), and there are no more
+ *	 descriptors in the receive list.
+ *	*overrun: Set in SOP/EOP if the received frame was larger than the
+ *	 amount of buffer allocated by the receive queue. The NIC specification is
+ *	 ambiguous of whether it is the SOP or EOP buffer descriptor that will have
+ *	 this bit set and therefore the model sets it in both:
+ *	 -"The overrun error bit will be set in the frame EOP buffer descriptor."
+ *	 -"This flag is set by the EMAC in the SOP buffer descriptor, if the
+ *     received packet was aborted due to a receive overrun."
+ *	*Packet length: Set in the SOP buffer descriptor to the total length of the
+ *	 received frame. The sum of the buffer length fields of the frame is equal
+ *   to the value of this field.
+ *
+ *	The reception automaton assumes that receive overruns are enabled. This
+ *	means that a frame that is too long to be stored in the buffers addressed
+ *	by the buffer descriptors in the reception queue is stored to the extent
+ *	that it fits, instead of being ignored (discarded).
+ *
+ *	The following gives a "detailed overview" of the reception automaton.
+ *
+ *	The name of a state of the reception automaton identifies which transition
+ *	function of the reception automaton that describes the next operation of
+ *	the reception automaton from that state. There is one difference, the names
+ *	of the transition functions are preceded by a number indicating the order
+ *	in which the transition functions are applied in the processing of a
+ *	received frame.
+ *
+ *	The names and the meanings of the states and the corresponding transition
+ *	functions are:
+ *	*0, name of transition function is rx_0receive_new_frame, and name of state
+ *	 is rx_idle: The reception automaton is idle, but can perform an initial
+ *	 transition from this state if certain conditions hold (apart from no
+ *	 received frame being processed, there is a reception queue of buffer
+ *	 descriptors and the initialization and reception automata are idle).
+ *	 The transition function is given a list of bytes representing the received
+ *	 frame, and initializes some model variables. The first transition function
+ *	 is then applied to fetch the first buffer descriptor of the reception
+ *	 queue.
+ *
+ *	*1, rx_fetch_next_bd: The next operation of the reception automaton is to
+ *	 fetch the next buffer descriptor from CPPI_RAM. First it is checked that
+ *	 the location of this buffer descriptor is 32-bit word aligned and that all
+ *	 its bytes are located in CPPI_RAM. If so, this buffer descriptor is read
+ *	 and it is checked that this buffer descriptor is correctly initialized. If
+ *	 not, the nic model enters a dead state. Otherwise some model variables are
+ *	 initialized and the state is set to rx_issue_next_memory_write_request.
+ *
+ *	*2, rx_issue_next_memory_write_request: The next operation of the reception
+ *	 automaton is to issue the next memory write request to store the next byte
+ *	 of the received frame in memory. If there are additional bytes of the
+ *	 frame to store in memory after this issued memory write request, the
+ *	 reception automaton stays in this state. Otherwise the reception automaton
+ *	 enters the state rx_write_packet_error.
+ *
+ *	*3, rx_write_packet_error: The next operation is to write the packet error
+ *	 field of the current buffer descriptor with an unknown value (given as an
+ *	 argument). There are two reasons why the written value is unknown:
+ *	 -It is unknown whether this field is written only in SOP, EOP or all
+ *	  buffer descriptors. Hence, the behavior of not writing this field is
+ *	  described by writing the same value that the field currently has. This is
+ *	  also the reason of why this operation is described to occur at this
+ *	  point. It is easy to write all buffer descriptors at this point, since
+ *	  the processing of all buffer descriptors are described by the previous
+ *	  two transition functions.
+ *	 -The value written depends on properties of the received frame. Sometimes
+ *	  a received frame might satisfy a certain property and at another time a
+ *	  received frame might not satisfy the property. By writing an unknown
+ *	  value all possible bit field values are described.
+ *	 The next state is rx_write_rx_vlan_encap.
+ *
+ *	*4, rx_write_rx_vlan_encap: The next operation is to write the
+ *	 rx_vlan_encap field. This operation is described in the same way as how
+ *	 the packet error field is written. The next state is rx_write_from_port.
+ *
+ *	*5, rx_write_from_port: The next operation is to write the from port field.
+ *	 This operation is described in the same way as how the packet error field
+ *	 is written. If the complete frame has been stored in memory or the current
+ *	 buffer descriptor is the last one in the queue, then the current buffer
+ *	 descriptor is the EOP buffer descriptor of the current frame and
+ *	 post-processing of the SOP and EOP buffer descriptors of the received
+ *	 frame shall begin and therefore the state is set to
+ *	 rx_write_eop_buffer_length. Otherwise the next buffer descriptor in the
+ *	 reception queue is used to store the remaining bytes of the received frame
+ *	 and therefore the state is set to rx_fetch_next_bd. Furthermore it is
+ *	 checked whether an overrun has occurred (not enough memory is addressed by
+ *	 the buffer descriptors in the reception queue to store the received frame)
+ *	 and the corresponding state component nic.rx.overrun is set accordingly.
+ *
+ *	*6, rx_write_eop_buffer_length: Writes the buffer length field of the EOP
+ *	 buffer descriptor. The next state is rx_set_eop_eop.
+ *
+ *	*7, rx_set_eop_eop: Sets the EOP flag of the EOP buffer descriptor. The
+ *	 next state is rx_write_eop_eoq_or_sop_buffer_offset.
+ *
+ *	*8, rx_write_eop_eoq_or_sop_buffer_offset: If the current buffer descriptor
+ *	 is last in the reception queue, then the EOQ bit is set of the EOP buffer
+ *	 descriptor and the next state is set to rx_write_sop_buffer_offset.
+ *	 Otherwise the buffer offset field is written of the SOP buffer descriptor
+ *	 and the state is set to rx_write_sop_buffer_length.
+ *
+ *	*9, rx_write_sop_buffer_offset: Writes the buffer offset field of the SOP
+ *	 buffer descriptor and sets the state to rx_write_sop_buffer_length.
+ *
+ *	*10, rx_write_sop_buffer_length: Writes the buffer length field of the SOP
+ *	 buffer descriptor and sets the state to rx_set_sop_sop. If the SOP and EOP
+ *	 buffer descriptors are the same, then this step repeats the operation
+ *	 described by transition function 6. It is unknown whether this repetitious
+ *	 description is correct, since the NIC specification is unclear whether the
+ *	 hardware performs the same operation twice or not.
+ *
+ *	*11, rx_set_sop_sop: Sets the SOP flag of the SOP buffer descriptor and the
+ *	 next state is rx_write_sop_pass_crc.
+ *
+ *	*12, rx_write_sop_pass_crc: Writes the pass crc flag of the SOP buffer
+ *	 descriptor with an unknown value since the field depends on properties of
+ *	 the received frame. The state is set to rx_write_sop_long.
+ *
+ *	*13, rx_write_sop_long: Writes the long flag of the SOP buffer descriptor
+ *	 with an unknown value since the field depends on properties of the
+ *	 received frame. The state is set to rx_write_sop_short.
+ *
+ *	*14, rx_write_sop_short: Writes the short flag of the SOP buffer descriptor
+ *	 with an unknown value since the field depends on properties of the
+ *	 received frame. The state is set to rx_write_sop_mac_ctl.
+ *
+ *	*15, rx_write_sop_mac_ctl: Writes the mac_ctl flag of the SOP buffer
+ *	 descriptor with an unknown value since the field depends on properties of
+ *	 the received frame. The state is set to rx_write_sop_packet_length.
+ *
+ *	*16, rx_write_sop_packet_length: Writes the packet length field of the SOP
+ *	 buffer descriptor, which is equal to the sum of the buffer length fields
+ *	 of all buffer descriptors of the received frame. The state is set to
+ *	 rx_set_sop_overrun_or_clear_owner_and_hdp.
+ *
+ *	*17, rx_set_sop_overrun_or_clear_owner_and_hdp: If an overrun has occurred
+ *	 the overrun flag is set in the SOP, EOP or both buffer descriptors. Which
+ *	 one of the three alternatives that is chosen is provided by a parameter
+ *	 since the NIC specification is unclear regarding this. The next state is
+ *	 set to rx_clear_sop_owner_and_hdp. If an overrun has not occurred, then:
+ *	 -the ownership bit is cleared in the SOP buffer descriptor,
+ *	 -if the EOP buffer descriptor is last in the reception queue then the
+ *	  RX0_HDP register is also cleared, and
+ *	 -the state is set to rx_write_cp.
+ *
+ *	*18, rx_clear_sop_owner_and_hdp: The ownership bit is cleared in the SOP
+ *	 buffer descriptor, if the EOP buffer descriptor is last in the reception
+ *	 queue then the  RX0_HDP register is cleared, and the state is set to
+ *	 rx_write_cp.
+ *
+ *	*19, rx_write_cp: Writes the RX0_CP register with the physical address of
+ *	 the EOP buffer descriptor and potentially asserts an interrupt depending
+ *	 on a parameter since the interrupt registers are not modeled. The state is
+ *	 set to rx_idle.
+ *
+ *	The state components of the reception automaton are:
+ *	*nic.rx.state : rx_abstract_state: State of the reception automaton.
+ *	 Initialized to rx_idle.
+ *
+ *	*nic.rx.frame : 32 word list: List containing the remaining bytes to store
+ *	 in memory.
+ *
+ *	*nic.rx.frame_length : 32 word: Length in bytes of the received frame. Is
+ *	 set to the length of a new frame when that frame is received, and is
+ *	 thereafter never changed.
+ *
+ *	*nic.rx.frame_bytes_left : 32 word: Number of remaining bytes of the
+ *	 received frame to transfer to memory. When a frame is received, this state
+ *	 component is set to the the length of the frame. Decremented when a byte
+ *	 has been transferred. The following is an invariant:
+ *	 Length nic.rx.frame = nic.rx.frame_bytes_left.
+ *
+ *	*nic.rx.current_bd_pa : 32 word: Physical address of the currently
+ *	 processed buffer descriptor.
+ *
+ *	*nic.rx.current_bd : bd_data: Internal data structure storing the values of
+ *	 the fields of the currently processed buffer descriptor.
+ *
+ *	*nic.rx.overrun : bool: True if and only if the currently received frame
+ *	 causes an overrun.
+ *
+ *	*nic.rx.current_bd_number_of_stored_bytes : 32 word: Number of bytes of the
+ *	 received frame that have been stored so far in the buffer addressed by the
+ *	 current buffer descriptor.
+ *
+ *	*nic.rx.next_buffer_byte_address : 32 word: Physical address of where to
+ *	 store the next byte of the received frame.
+ *
+ *	*nic.rx.current_bd_size : 32 word: Available size in bytes of the buffer
+ *	 addressed by the current buffer descriptor.
+ *
+ *	*nic.rx.sop_bd_pa : 32 word: Physical address of the SOP buffer descriptor
+ *	 of the received frame.
+ *
+ *	*nic.rx.sop_buffer_offset : 32 word: Buffer offset value of the SOP buffer
+ *	 descriptor of the received frame.
+ *
+ *	*nic.rx.sop_buffer_used_length : 32 word: Number of used bytes of the
+ *	 buffer addressed by the SOP buffer descriptor. This information is used in
+ *	 case the size of the frame is greater than the buffer addressed by the SOP
+ *	 buffer descriptor.
+ *
+ *	*nic.rx.eop_bd_pa : 32 word: Physical address of the EOP buffer descriptor
+ *	 of the currently received frame.
+ *
+ *	*nic.rx.interrupt : bool: True if and only if the reception automaton
+ *	 currently asserts a frame reception completion interrupt. Initialized to
+ *	 false.
+ *
+ *	The following two data types are used in the definition of the reception
+ *	automaton:
+ *	External reception values e_rx_values:
+ *	-frame : 8 word list.
+ *	-packet_error : 2 word.
+ *	-rx_vlan_encap : 1 word.
+ *	-from_port : 3 word.
+ *	-pass_crc : 1 word.
+ *	-long : 1 word.
+ *	-short : 1 word.
+ *	-mac_ctl : 1 word.
+ *	-sop_eop_both_overrun: overrun_case.
+ *	-assert_interrupt : bool.
+ *
+ *	Which buffer descriptors in which the overrun flag shall be set
+ *	overrun_case:
+ *	-sop_overrun
+ *	-eop_overrun
+ *	-both_overrun
+ */
+
+-------------------------------------------------------------------------------
+/*
+ *	Applied by nic_execute when the reception automaton shall perform its next
+ *	transition.
+ */
+(nic_state, mem_req) receive_frame(nic : nic_state, v : e_rx_values) ≝
+	if nic.rx.state = rx_idle then
+		return rx_0receive_new_frame(nic, v.frame)
+	else if nic.rx.state = rx_fetch_next_bd then
+		return rx_1fetch_next_bd(nic)
+	else if nic.rx.state = rx_issue_next_memory_write_request then
+		return rx_2issue_next_memory_write_request(nic)
+	else if nic.rx.state = rx_write_packet_error then
+		return rx_3write_packet_error(nic, v.packet_error)
+	else if nic.rx.state = rx_write_rx_vlan_encap then
+		return rx_4write_rx_vlan_encap(nic, v.rx_vlan_encap)
+	else if nic.rx.state = rx_write_from_port then
+		return rx_5write_from_port(nic, v.from_port)
+	else if nic.rx.state = rx_write_eop_buffer_length then
+		return rx_6write_eop_buffer_length(nic)
+	else if nic.rx.state = rx_set_eop_eop then
+		return rx_7set_eop_eop(nic)
+	else if nic.rx.state = rx_write_eop_eoq_or_sop_buffer_offset then
+		return rx_8write_eop_eoq_or_sop_buffer_offset(nic)
+	else if nic.rx.state = rx_write_sop_buffer_offset then
+		return rx_9write_sop_buffer_offset(nic)
+	else if nic.rx.state = rx_write_sop_buffer_length then
+		return rx_10write_sop_buffer_length(nic)
+	else if nic.rx.state = rx_set_sop_sop then
+		return rx_11set_sop_sop(nic)
+	else if nic.rx.state = rx_write_sop_pass_crc then
+		return rx_12write_sop_pass_crc(nic, v.pass_crc)
+	else if nic.rx.state = rx_write_sop_long then
+		return rx_13write_sop_long(nic, v.long)
+	else if nic.rx.state = rx_write_sop_short then
+		return rx_14write_sop_short(nic, v.short)
+	else if nic.rx.state = rx_write_sop_mac_ctl then
+		return rx_15write_sop_mac_ctl(nic, v.mac_ctl)
+	else if nic.rx.state = rx_write_sop_packet_length then
+		return rx_16write_sop_packet_length(nic)
+	else if nic.rx.state = rx_set_sop_overrun_or_clear_owner_and_hdp then
+		return rx_17set_sop_overrun_or_clear_owner_and_hdp(nic, v.sop_eop_both_overrun)
+	else if nic.rx.state = rx_clear_sop_owner_and_hdp then
+		return rx_18clear_sop_owner_and_hdp(nic)
+	else	//nic.rx.state = rx_write_cp.
+		return rx_19write_cp(nic, v.assert_interrupt)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Applied by nic_execute when nic_execute has decided that the NIC has
+ *  received a new frame and that the reception automaton shall perform its
+ *  first transition due to this received frame.
+ *
+ *	Then the first transition function of the reception automaton is applied to
+ *	complete the first transition when a frame has been received.
+ *
+ *	The NIC model is in a state where it can receive a new frame when all of
+ *  the following conditions hold:
+ *	*No received frame is currently being processed. Since only one reception
+ *	 DMA channel is modeled, only one received frame can be processed at a
+ *	 time.
+ *	*The initialization and reception teardown automata are idle. The NIC
+ *	 specification does not specify the operations related to reception if the
+ *	 initialization or reception teardown operations are being performed
+ *	 simultaneously as reception operations.
+ *	*There is a reception queue of buffer descriptors. There must be buffers
+ *	 addressed by buffer descriptors in order for frames to be stored into
+ *   memory.
+ *
+ *	The value of each byte of the frame is non-deterministically decided, since
+ *	the byte was received from the unknown outside world. These values are
+ *	provided by the parameter received_frame, being a list of bytes.
+ */
+(nic_state, mem_req) rx_0receive_new_frame(nic : nic_state, received_frame : 8 word list) ≝
+	//The bytes of the frame that are yet to be transferred to memory.
+	nic.rx.frame ≔ received_frame
+
+	//The length of the received frame.
+	nic.rx.frame_length ≔ length received_frame
+
+	//Number of remaining bytes of the received frame to transfer to memory.
+	nic.rx.frame_bytes_left ≔ nic.rx.frame_length
+
+	//Since no hardware work is described, transition function 1 is applied.
+	return rx_1fetch_next_bd(nic)
+-------------------------------------------------------------------------------
+
+CPPI_RAM_START ≔ 0x4A10_2000
+CPPI_RAM_END ≔ 0x4A10_4000
+
+BBB_RAM_START ≔ 0x8000_0000
+BBB_RAM_END ≔ 0xA000_0000
+
+//True if and only if the buffer of the buffer descriptor bd with buffer offset
+//bo is completely located in RAM on BeagleBone Black.
+RX_BUFFER_IN_BBB_RAM bd bo ≝
+	let start_pa = bd.bp + bo
+	and length = bd.bl - bo
+	in
+	∀offset. offset <+ length ⇒ BBB_RAM_START ≤+ start_pa + offset ∧ start_pa + offset <+ BBB_RAM_END
+
+//True if and only if the buffer of the buffer descriptor bd with buffer offset
+//bo wraps around 2^32 (overflows with respect to 32-bit arithmetic).
+RX_BUFFER_OVERFLOW bd bo ≝
+	let start_pa = bd.bp + bo
+	and length = bd.bl - bo
+	in
+	length +> 0w ⇒ ∃offset. offset <+ length ∧ start_pa + offset <+ start_pa
+
+//True if and only if all bytes of the buffer descriptor at physical address
+//bd_pa are located in CPPI_RAM.
+BD_IN_CPPI_RAM bd_pa ≝ CPPI_RAM_START ≤+ bd_pa ∧ bd_pa <+ CPPI_RAM_END - 0xFw
+
+//True if and only if pa is 32-bit word aligned.
+32BIT_WORD_ALIGNED pa ≝ pa[1:0] = 0w
+
+//True if and only if the address bd_pa is a well-defined location for storing
+//a buffer descriptor.
+BD_LOCATION_DEFINED bd_pa ≝ 32BIT_WORD_ALIGNED bd_pa ∧ BD_IN_CPPI_RAM bd_pa
+
+//Checks that:
+//-Buffer offset: Cleared
+//-Buffer length: Number of bytes in the buffer. Must be greater than zero.
+//-SOP: Cleared
+//-EOP: Cleared
+//-Ownership: Set
+//-EOQ: Cleared
+//-The addressed buffer is completely located in RAM of BBB.
+//-The addressed buffer does not wrap around 2^32 (overflow).
+//-For SOP buffer descriptors the value of the buffer length field must be
+// greater than the value of RX_BUFFER_OFFSET, and to be on the safe side the
+// "Pass CRC" field must also be zero (the NIC specification says "This flag
+// should be cleared by the software application before submitting the
+// descriptor to the receive queue.").
+RX_BD_WELL_DEFINED bd sop rx_buffer_offset_register ≝
+	bd.bo = 0 ∧ bd.bl >+ 0 ∧
+	¬bd.sop ∧ ¬bd.eop ∧ bd.own ∧ ¬bd.eoq ∧
+	[sop ⇒ RX_BUFFER_IN_BBB_RAM bd rx_buffer_offset_register] ∧
+	[¬sop ⇒ RX_BUFFER_IN_BBB_RAM bd 0w] ∧
+	[sop ⇒ ¬RX_BUFFER_OVERFLOW bd rx_buffer_offset_register] ∧
+	[¬sop ⇒ ¬RX_BUFFER_OVERFLOW bd 0w] ∧
+	[sop ⇒ bd.bl >+ rx_buffer_offset_register ∧ ¬bd.pass_crc]
+-------------------------------------------------------------------------------
+/*
+ *	Checks that the current buffer descriptor is 32-bit word aligned and that
+ *	each of its bytes is located in CPPI_RAM. Otherwise the NIC model enters a
+ *	dead state.
+ *
+ *	Then reads the current buffer descriptor and stores it in an internal data
+ *  structure.
+ *	
+ *	Checks that the read buffer descriptor is correctly initialized:
+ *	-The buffer offset, SOP, EOP and EOQ fields are cleared.
+ *	-The ownership field is set.
+ *	-The buffer length field is greater than zero.
+ *	-If the current buffer descriptor is of type SOP, then the buffer length
+ *	 field must be greater than the value in the RX_BUFFER_OFFSET register, and
+ *	 the Pass CRC field must be zero.
+ *	-The addressed buffer is completely located in RAM of BBB:
+ *	 [0x8000_0000, 0x8000_0000 + 0x2000_0000).
+ *	-The addressed buffer does not wrap around 2^32 (overflow).
+ *
+ *	If any of these requirements is not met, then the NIC model enters a dead
+ *	state. Otherwise, variables used in later transition functions are
+ *	initialized.
+ */
+(nic_state, mem_req) rx_1fetch_next_bd(nic : nic_state) ≝
+	if ¬BD_LOCATION_DEFINED nic.rx.current_bd_pa then
+		nic.dead ≔ true
+		return (nic, ⊥)
+	else
+		//Reads the current buffer descriptor from CPPI_RAM and stores the data
+		//in the internal state component nic.rx.current_bd.
+		nic.rx.current_bd ≔ rx_read_bd nic.rx.current_bd_pa nic.regs.CPPI_RAM
+
+		//The current buffer descriptor is a SOP if its address is equal to the
+		//address of the SOP.
+		current_bd_sop : bool ≔ nic.rx.current_bd_pa = nic.rx.sop_bd_pa
+
+		if ¬RX_BD_WELL_DEFINED nic.rx.current_bd current_bd_sop nic.regs.RX_BUFFER_OFFSET then
+			nic.dead ≔ true
+			return (nic, ⊥)
+    	else
+		   	//No bytes of the received frame have been stored so far in the
+			//buffer addressed by the current buffer descriptor.
+			nic.rx.current_bd_number_of_stored_bytes ≔ 0
+
+		    //If the current buffer descriptor is a SOP of the received frame,
+			//then the address of the first byte of the buffer depends on the value stored
+			//in the RX_BUFFER_OFFSET register.
+		    if current_bd_sop then
+    			//The physical address of where to store the first byte of the
+				//received frame.
+			    nic.rx.next_buffer_byte_address ≔ nic.rx.current_bd.bp + nic.regs.RX_BUFFER_OFFSET
+	
+    			//The available size of the buffer addressed by the current
+				//buffer descriptor.
+			    nic.rx.current_bd_size ≔ nic.rx.current_bd.bl - nic.regs.RX_BUFFER_OFFSET
+	
+    			//The buffer offset value for the SOP buffer descriptor.
+			    nic.rx.sop_buffer_offset ≔ nic.regs.RX_BUFFER_OFFSET
+	
+		    	//The number of used bytes of the buffer addressed by the SOP
+				//buffer descriptor. This information is used in case the size
+				//of the frame is greater than the buffer of the SOP buffer
+				//descriptor.
+			    nic.rx.sop_buffer_used_length ≔ nic.rx.current_bd.bl - nic.regs.RX_BUFFER_OFFSET
+	
+    	       	nic.rx.state ≔ rx_issue_next_memory_write_request
+    	    	return (nic, ⊥)
+		    else
+		        nic.rx.next_buffer_byte_address ≔ nic.rx.current_bd.bp
+			    nic.rx.current_bd_size ≔ nic.rx.current_bd.bl
+    	    	nic.rx.state ≔ rx_issue_next_memory_write_request
+    	    	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Issues a memory write request for the next byte to store of the received
+ *	frame in the buffer addressed by the current buffer descriptor. If all
+ *	memory write requests have been issued or the buffer of the current buffer
+ *	descriptor is full, then the next transition of the reception automaton is
+ *	described by transition function 3.
+ */
+(nic_state, mem_req) rx_2issue_next_memory_write_request(nic : nic_state) ≝
+	//The head of the frame is to be stored to memory.
+	memory_write_request : mem_req ≔ (nic.rx.next_buffer_byte_address, HD nic.rx.frame)
+	//The remaining part (tail) of the frame is kept.
+	nic.rx.frame ≔ TL nic.rx.frame
+	//One byte less to store in memory.
+	nic.rx.frame_bytes_left ≔ nic.rx.frame_bytes_left - 1
+	//One additional byte has been stored in the buffer addressed by the
+	//current buffer descriptor.
+	nic.rx.current_bd_number_of_stored_bytes ≔ nic.rx.current_bd_number_of_stored_bytes + 1
+	///Address at where the next byte shall be stored.
+	nic.rx.next_buffer_byte_address ≔ nic.rx.next_buffer_byte_address + 1
+
+	//Checks if this is the last byte to store to memory or if the buffer of
+	//the current buffer descriptor is full. If so the reception automaton
+	//enters step 3.
+	if nic.rx.frame_bytes_left = 0 ∨ nic.rx.current_bd_number_of_stored_bytes = nic.rx.current_bd_size then
+		nic.rx.state ≔ rx_write_packet_error
+
+	//Returns a tuple that represents a memory write request: (pa, value).
+	return (nic, memory_write_request)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the packet error field of the current buffer descriptor. Unknown
+ *	whether it is written in all buffer descriptors of the current frame or
+ *	just in the SOP. The packet error field is therefore written to a
+ *	non-deterministically chosen value for all buffer descriptors of the
+ *	current frame.
+ */
+(nic_state, mem_req) rx_3write_packet_error(nic : nic_state, packet_error : 2 word) ≝
+	nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 14)[4:3] ≔ packet_error
+	nic.rx.state ≔ rx_write_rx_vlan_encap
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the rx_vlan_encap field of the current buffer descriptor. Unknown
+ *	whether it is written in all buffer descriptors of the current frame or
+ *	just in the SOP. The rx_vlan_encap field is therefore written to a
+ *	non-deterministically chosen value for all buffer descriptors of the
+ *	current frame.
+ */
+(nic_state, mem_req) rx_4write_rx_vlan_encap(nic : nic_state, rx_vlan_encap : 1 word) ≝
+	nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 14)[2] ≔ rx_vlan_encap
+	nic.rx.state ≔ rx_write_from_port
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the "from port" field of the current buffer descriptor. Unknown
+ *	whether it is written in all buffer descriptors of the current frame or
+ *	just in the SOP. The "from port" field is therefore written to a
+ *	non-deterministically chosen value for all buffer descriptors of the
+ *	current frame. It is also unknown if it is a port mask (port 0: 0b000, port
+ *	1: 0b010, port 2: 0b100) or a port number (0, 1, 2).
+ *
+ *	If the complete frame has been stored in memory or the current buffer
+ *	descriptor is the last one in the queue, then the current buffer descriptor
+ *	is the EOP buffer descriptor of the current frame. Otherwise current_bd_pa
+ *	is advanced to the next buffer descriptor in the reception queue.
+ */
+(nic_state, mem_req) rx_5write_from_port(nic : nic_state, from_port : 3 word) ≝
+	nic.regs.CPPI_RAM(nic.rx.current_bd_pa - 0x4A10_2000 + 14)[2:0] ≔ from_port
+
+	//The complete frame has been stored in memory. The following transition
+	//functions perform post-processing by writing certain fields of the SOP
+	//and EOP buffer descriptors of the received frame.
+	if nic.rx.frame_bytes_left = 0 then
+		nic.rx.eop_bd_pa ≔ nic.rx.current_bd_pa
+		nic.rx.overrun ≔ false
+		nic.rx.state ≔ rx_write_eop_buffer_length
+		return (nic, ⊥)
+	//The complete frame does not fit in the buffers addressed by the buffer
+	//descriptors in the receive queue, and hence there is an overrun, and no
+	//more bytes of the frame will be transferred to memory.
+	else if nic.rx.current_bd.ndp = 0 then
+		nic.rx.eop_bd_pa ≔ nic.rx.current_bd_pa
+		nic.rx.overrun ≔ true
+		nic.rx.state ≔ rx_write_eop_buffer_length
+		return (nic, ⊥)
+	//There are remaining bytes of the frame to store in memory and buffers for
+	//storing those remaining bytes.
+	else
+		//Advances current_bd to the next buffer descriptor.
+		nic.rx.current_bd_pa ≔ nic.rx.current_bd.ndp
+		nic.rx.state ≔ rx_fetch_next_bd
+		return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+/*
+ *	The following transition functions describe post processing of SOP and EOP
+ *	buffer descriptors of the received frame, since the frame has at this point
+ *	been stored in memory.
+ */
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the buffer length field of the EOP buffer descriptor to the number
+ *	of bytes stored in the buffer addressed by the EOP buffer descriptor. If
+ *	this buffer descriptor is a SOP as well, then this operation will be
+ *	described twice since a later transition function (10) writes the buffer
+ *	length field of SOP buffer descriptors.
+ */
+(nic_state, mem_req) rx_6write_eop_buffer_length(nic : nic_state) ≝
+	nic.regs.CPPI_RAM(nic.rx.eop_bd_pa - 0x4A10_2000 + 8) ≔ nic.rx.current_bd_number_of_stored_bytes[7:0]
+	nic.regs.CPPI_RAM(nic.rx.eop_bd_pa - 0x4A10_2000 + 9)[2:0] ≔ nic.rx.current_bd_number_of_stored_bytes[10:8]
+	nic.rx.state ≔ rx_set_eop_eop
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the EOP bit in the EOP buffer descriptor.
+ */
+(nic_state, mem_req) rx_7set_eop_eop(nic : nic_state) ≝
+	nic.regs.CPPI_RAM(nic.rx.eop_bd_pa - 0x4A10_2000 + 15)[6] ≔ 1
+	nic.rx.state ≔ rx_write_eop_eoq_or_sop_buffer_offset
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	If EOP buffer descriptor is the last buffer descriptor in the reception
+ *	queue, then its EOQ bit is set and the next operation is to write the
+ *	buffer offset field of the SOP buffer descriptor. Otherwise the buffer
+ *	offset field is written of the SOP buffer descriptor and the next operation
+ *	is to write the buffer length field of the SOP buffer descriptor.
+ */
+(nic_state, mem_req) rx_8write_eop_eoq_or_sop_buffer_offset(nic : nic_state) ≝
+	if nic.rx.current_bd.ndp = 0 then
+		nic.regs.CPPI_RAM(nic.rx.eop_bd_pa - 0x4A10_2000 + 15)[4] ≔ 1
+		nic.rx.state ≔ rx_write_sop_buffer_offset
+		return (nic, ⊥)
+	else
+		nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 10) ≔ nic.rx.sop_buffer_offset[7:0]
+		nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 11)[2:0] ≔ nic.rx.sop_buffer_offset[10:8]
+		nic.rx.state ≔ rx_write_sop_buffer_length
+		return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the buffer offset field of the SOP buffer descriptor of the the
+ *	received frame to the value of the RX_BUFFER_OFFSET register when it was
+ *	read when the current buffer descriptor was fetched from CPPI_RAM. The
+ *	buffer length field in the SOP buffer descriptor after the
+ *	frame has been received is equal to the size of the addressed buffer minus
+ *	the buffer offset field of that buffer descriptor, if the data buffer is
+ *	filled.
+ */
+(nic_state, mem_req) rx_9write_sop_buffer_offset(nic : nic_state) ≝
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 10) ≔ nic.rx.sop_buffer_offset[7:0]
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 11)[2:0] ≔ nic.rx.sop_buffer_offset[10:8]
+	nic.rx.state ≔ rx_write_sop_buffer_length
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the buffer length field of the SOP buffer descriptor of the received
+ *	frame to the number of bytes of the received frame that are stored in the
+ *	buffer addressed by the SOP buffer descriptor.
+ *
+ *	If the EOP buffer descriptor is also a SOP then the number of bytes stored
+ *	in the buffer of the current buffer descriptor is stored by
+ *	nic.rx.current_bd_number_of_stored_bytes. This operation overwrites the
+ *	value written by transition function 6, since these two transition
+ *	functions, 6 and 10, are not considered to describe the same hardware
+ *	operations, and it is unknown whether this is correct. The reason for this
+ *	description is that it is difficult to interpret the NIC specification of
+ *	whether the hardware performs the same operation twice or not.
+ *
+ *	If the EOP buffer descriptor is not a SOP, then the SOP specific variable
+ *	sop_buffer_used_length contains the number of bytes stored in the buffer
+ *	addressed by the SOP buffer descriptor, since it considers the value of the
+ *	RX_BUFFER_OFFSET register. sop_buffer_used_length must be used in case the
+ *	SOP and EOP buffer descriptors are distinct since the value of the
+ *	RX_BUFFER_OFFSET register is not considered for non-SOP buffer descriptors.
+ */
+(nic_state, mem_req) rx_10write_sop_buffer_length(nic : nic_state) ≝
+	//If the EOP buffer descriptor is a SOP, then the value written by
+	//transition function 6 is written again. The value of the RX_BUFFER_OFFSET
+	//register, read by transition function 1, does not need to be considered.
+	if nic.rx.sop_bd_pa = nic.rx.eop_bd_pa then
+		nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 8) ≔ nic.rx.current_bd_number_of_stored_bytes[7:0]
+		nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 9)[2:0] ≔ nic.rx.current_bd_number_of_stored_bytes[10:8]
+	//If the current buffer descriptor is not of type SOP, then the value of
+	//the RX_BUFFER_OFFSET register, read by transition function 1, must be
+	//considered which is done by means of the variable sop_buffer_used_length.
+	else
+		nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 8) ≔ nic.rx.sop_buffer_used_length[7:0]
+		nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 9)[2:0] ≔ nic.rx.sop_buffer_used_length[10:8]
+
+	nic.rx.state ≔ rx_set_sop_sop
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the SOP bit in the SOP buffer descriptor of the received frame.
+ */
+(nic_state, mem_req) rx_11set_sop_sop(nic : nic_state) ≝
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 15)[7] ≔ 1
+	nic.rx.state ≔ rx_write_sop_pass_crc
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the "Pass CRC" field in the SOP buffer descriptor of the received
+ *	frame. The value is non-deterministically chosen since the value depends on
+ *	properties of the received frame.
+ */
+(nic_state, mem_req) rx_12write_sop_pass_crc(nic : nic_state, pass_crc : 1 word) ≝
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 15)[2] ≔ pass_crc
+	nic.rx.state ≔ rx_write_sop_long
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the long field in the SOP buffer descriptor of the received frame.
+ *	The value is determined non-deterministically since the value depends on
+ *	properties of the received frame.
+ */
+(nic_state, mem_req) rx_13write_sop_long(nic : nic_state, long : 1 word) ≝
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 15)[1] ≔ long
+	nic.rx.state ≔ rx_write_sop_short
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the short field in the SOP buffer descriptor of the received frame.
+ *	The value is determined non-deterministically since the value depends on
+ *	properties of the received frame.
+ */
+(nic_state, mem_req) rx_14write_sop_short(nic : nic_state, short : 1 word) ≝
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 15)[0] ≔ short
+	nic.rx.state ≔ rx_write_sop_mac_ctl
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the mac_ctl field in the SOP buffer descriptor of the received
+ *	frame. The value is determined non-deterministically since the value
+ *	depends on properties of the received frame.
+ */
+(nic_state, mem_req) rx_15write_sop_mac_ctl(nic : nic_state, mac_ctl : 1 word) ≝
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 14)[7] ≔ mac_ctl
+	nic.rx.state ≔ rx_write_sop_packet_length
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the packet length field (length of the received frame, being equal
+ *	to the sum of the buffer length fields) in the SOP buffer descriptor of the
+ *	received frame. In case of overrun, the number of discarded bytes must be
+ *	subtracted from the length of the frame, which is zero if no overrun
+ *	occurred.
+ */
+(nic_state, mem_req) rx_16write_sop_packet_length(nic : nic_state) ≝
+	packet_length : 32 word ≔ nic.rx.frame_length - nic.rx.frame_bytes_left
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 12) ≔ packet_length[7:0]
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 13)[2:0] ≔ packet_length[10:8]
+	nic.rx.state ≔ rx_set_sop_overrun_or_clear_owner_and_hdp
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Sets the overrun bit if an overrun occurred. Otherwise the ownership bit is
+ *	cleared, and if the EOP buffer descriptor is last in the reception queue,
+ *	then the RX0_HDP register is also cleared.
+ *
+ *	The NIC specification says the following at two different places:
+ *	-"This flag is set by the EMAC in the SOP buffer descriptor, if the
+ *	  received packet was aborted due to a receive overrun."
+ *	-"The overrun error bit will be set in the frame EOP buffer
+ *	  descriptor."
+ *
+ *	Hence it is ambiguous whether the overrun bit shall be set in the SOP or
+ *	EOP buffer descriptor. It is therefore decided non-deterministically
+ *	whether the overrun bit is set in the SOP, EOP or both buffer descriptors.
+ */
+(nic_state, mem_req) rx_17set_sop_overrun_or_clear_owner_and_hdp(nic : nic_state, sop_eop_both : overrun_case) ≝
+	if nic.rx.overrun then
+		if sop_eop_both = sop_overrun then
+			//Sets the overrun bit in the SOP buffer descriptor.
+			nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 14)[6] ≔ 1
+		else if sop_eop_both = eop_overrun then
+			//Sets the overrun bit in the EOP buffer descriptor.
+			nic.regs.CPPI_RAM(nic.rx.eop_bd_pa - 0x4A10_2000 + 14)[6] ≔ 1
+		else	//sop_eop_both = both_overrun
+			//Sets the overrun bit in both SOP and EOP buffer descriptors.
+			nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 14)[6] ≔ 1
+			nic.regs.CPPI_RAM(nic.rx.eop_bd_pa - 0x4A10_2000 + 14)[6] ≔ 1
+
+		nic.rx.state ≔ rx_clear_sop_owner_and_hdp
+		return (nic, ⊥)
+	else
+		//Clears the ownership bit.
+		nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 15)[5] ≔ 0
+
+		//Clears RX0_HDP if the current buffer descriptor, of type EOP, is the last
+		//one in the queue.
+		if nic.rx.current_bd.ndp = 0 then
+			nic.regs.RX0_HDP ≔ 0
+
+		//If the current buffer descriptor is last, then current_bd_pa and
+		//sop_bd_pa are synchronized with RX0_HDP. Otherwise they are advanced
+		//to the next buffer descriptor that will be processed also be the SOP
+		//of the next received frame. These pointer updates are performed at
+		//this step and not in the next step, since software might update
+		//RX0_HDP between the state rx_write_cp and rx_idle.
+		nic.rx.current_bd_pa ≔ nic.rx.current_bd.ndp
+		nic.rx.sop_bd_pa ≔ nic.rx.current_bd.ndp
+
+		nic.rx.state ≔ rx_write_cp
+		return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+/*
+ *	Consider the following five conditions (taken from the NIC specification):
+ *	1.	A misqueue condition is detected when the following three conditions
+ *		hold:
+ *		-The processed SOP buffer descriptor has a cleared ownership bit.
+ *		-The processed EOP buffer descriptor has a set EOQ bit.
+ *		-The processed EOP buffer descriptor has a non-zero Next Descriptor Pointer
+ *		 field.
+ *
+ *	2.	A misqueue condition is corrected by writing the physical address of
+ *		the appended buffer descriptor to RX0_HDP.
+ *
+ *	3.	Writing RX0_HDP when it is not zero is an error.
+ *
+ *	4.	RX0_HDP is zero after reception is completed.
+ *
+ *	5.	RX0_HDP is written to enable receptions of new frames.
+ *
+ *	These five conditions imply that when a misqueue condition has occurred,
+ *	RX0_HDP is zero. That is, the ownership and EOQ bits are written no earlier
+ *	than RX0_HDP is written.
+ *
+ *	These five conditions imply that when RX0_HDP is zero, the ownership bit of
+ *	the processed SOP buffer descriptor has been cleared. That is, the RX0_HDP
+ *	register is written no earlier than the ownership bit is written.
+ *
+ *	Since the ownership bit is cleared of the SOP buffer descriptor after the
+ *	EOQ bit is set of the EOP buffer descriptor, the second sentences of the
+ *	previous two paragraphs can be rephrased to:
+ *	-The ownership bit is written no earlier than RX0_HDP is written.
+ *	-RX0_HDP is written no earlier than the ownership bit is written.
+ *
+ *	These two latter rephrasings imply that the clearing of the ownership
+ *	bit of the SOP buffer descriptor and the clearing of the RX0_HDP register
+ *	are done atomically after the EOQ bit is set.
+ *
+ *	Clears the ownership bit of the SOP buffer descriptor of the received frame
+ *	and clears RX0_HDP if the current buffer descriptor is considered to be the
+ *	last buffer descriptor in the reception queue. (The word "considered" in
+ *	the previous sentence is chosen since the next descriptor field was read by
+ *	transition function 2, and might therefore have at this point a non-zero
+ *	value.)
+ */
+(nic_state, mem_req) rx_18clear_sop_owner_and_hdp(nic_state nic) ≝
+	//Clears the ownership bit.
+	nic.regs.CPPI_RAM(nic.rx.sop_bd_pa - 0x4A10_2000 + 15)[5] ≔ 0
+
+	//Clears RX0_HDP if the current buffer descriptor, of type EOP, is the last
+	//one in the queue. Also synchronizes RX0_HDP, current_bd_pa and sop_bd_pa.
+	if nic.rx.current_bd.ndp = 0 then
+		nic.regs.RX0_HDP ≔ 0
+
+	//If the current buffer descriptor is last, then current_bd_pa and
+	//sop_bd_pa are synchronized with RX0_HDP. Otherwise they are advanced to
+	//the next buffer descriptor that will be processed also be the SOP of the
+	//next received frame. These pointer updates are performed at this step and
+	//not in the next step, since software might update RX0_HDP between the
+	//state rx_write_cp and rx_idle.
+	nic.rx.current_bd_pa ≔ nic.rx.current_bd.ndp
+	nic.rx.sop_bd_pa ≔ nic.rx.current_bd.ndp
+
+	nic.rx.state ≔ rx_write_cp
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
+
+-------------------------------------------------------------------------------
+/*
+ *	Writes the address of the EOP buffer descriptor of the received frame to
+ *	the RX0_CP register. A frame reception completion interrupt is asserted
+ *	non-deterministically since the interrupt related registers are not
+ *	modeled.
+ *
+ *	At this point all operations for processing the received frame have been
+ *	described. The reception automaton therefore enters the idle state. If the
+ *	initialization or reception teardown automaton is pending (they are not in
+ *	their idle state), then that pending automaton can now be selected by
+ *	nic_execute to perform a transition (for the initialization automaton to be
+ *	selected, the transmission automaton must also be idle).
+ */
+(nic_state, mem_req) rx_19write_cp(nic : nic_state, assert_interrupt : bool) ≝
+	//Write the physical address of the last buffer descriptor of the received
+	//frame to the RX0_CP register.
+	nic.regs.RX0_CP ≔ nic.rx.eop_bd_pa
+
+	//Asserts a frame reception completion interrupt.
+	if assert_interrupt then
+		nic.rx.interrupt ≔ true
+		nic.interrupt ≔ true
+
+	//Enter idle state.
+	nic.rx.state ≔ rx_idle
+
+	return (nic, ⊥)
+-------------------------------------------------------------------------------
